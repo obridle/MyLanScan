@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.build-venv/
+
+# PyInstaller build output
+build/
+dist/
+*.spec
+
+# Distributables
+*.dmg
+*.zip
+
+# Generated test/example output
+Sample/S1_scan_export.csv
+
+# macOS
+.DS_Store
