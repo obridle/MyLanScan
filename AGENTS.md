@@ -42,11 +42,19 @@ then `arp -n`). `_record` merges by IP so a Bonjour-first host that later gains 
 MAC stays a single row.
 
 Nmap note: the per-host "Deep scan" shells out to the `nmap` CLI (never bundled — GPL
-+ size; recipients install `brew install nmap`). Deep scan runs unprivileged
-(`-sT -sV -sC`). OS detection (`-O`) needs root: when the app is unprivileged it's
-elevated per-run via osascript `do shell script … with administrator privileges`
-(native macOS password prompt) writing to a tailed temp file; if the app sees euid 0
-it runs directly. Never prompt for app-wide sudo.
++ size; recipients install `brew install nmap` / `sudo apt install nmap`). Deep scan
+runs unprivileged (`-sT -sV -sC`). OS detection (`-O`) needs root: when the app is
+unprivileged it's elevated per-run — macOS via osascript `do shell script … with
+administrator privileges`, Linux via `pkexec sh -c` — writing to a tailed temp file;
+if the app sees euid 0 it runs directly. Never prompt for app-wide sudo.
+
+Linux (added 2026-08, branch `linux-port`, v0.3.0): platform branches live alongside
+the macOS ones — `ip neigh show`/`ip route`/`ip -6 neigh` (`_arp_for`, `_default_iface`,
+`_ndp_table`), `ping -6 -I` for IPv6, `/usr/bin|/usr/sbin/nmap` in `_find_nmap`,
+`pkexec` elevation, and a labelled app-menu in `_build_menubar` (non-macOS). Build:
+`./build_package_linux.sh` (Docker buildx, Debian base for tkinter) → one-file
+binaries in `dist-linux/`. macOS behavior is unchanged — regression-check with
+`venv/bin/python Sample/S1mvp_test.py` on the Mac after touching shared code.
 
 Privilege note: discovery (1) works unprivileged-ish; SYN scanning and OS fingerprinting
 need raw sockets/root, plain TCP connect() does not — make elevation optional and degrade
@@ -67,9 +75,9 @@ freezes the window.
   customtkinter kept only until `Sample/S1mvp.py` is ported to PySide6).
 - UI framework decision (2026-08): **PySide6** — S1mvp's customtkinter was validated but
   is being replaced; don't extend the tkinter code.
-- **macOS is the primary (only) target platform** — dev machine and users are both on Mac.
-  Write for `arp -a` output and macOS `ping` flags; don't carry Linux/BSD branches
-  (`/proc/net/arp` etc.) unless Linux support is explicitly requested later.
+- **macOS is the primary target; Linux added 2026-08 (v0.3.0, branch `linux-port`)**
+  — dev machine is a Mac. Write platform branches alongside the macOS ones (`ip neigh`
+  on Linux vs `arp -n` on macOS); don't carry Windows/BSD branches unless requested.
   - ICMP echo requires root/setuid unless using unprivileged techniques
     (e.g. UDP datagram trick) — prefer stdlib/subprocess over scapy to avoid the dependency
     unless packet crafting becomes necessary.

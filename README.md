@@ -76,6 +76,21 @@ xattr -dr com.apple.quarantine /Applications/MyLanScan.app
 For a fully warning-free public release you'd need an Apple Developer ID
 ($99/yr) plus codesign with that identity and notarization.
 
+## Linux build
+
+`./build_package_linux.sh` builds self-contained single executables for Linux via
+Docker (Debian-based; needs Docker Desktop or any Docker with buildx):
+
+```
+dist-linux/MyLanScan-linux-x86_64     # x86_64 desktops
+dist-linux/MyLanScan-linux-aarch64    # ARM (Raspberry Pi OS, Apple-silicon VMs…)
+```
+
+Recipients just download the right one and run it (no Python needed). Deep scan
+needs nmap installed: `sudo apt install nmap`. OS detection uses the graphical
+PolicyKit prompt (`pkexec`). Tested under Docker: test suite passes, frozen binary
+launches under X.
+
 ## Usage
 
 Launch the app (`venv/bin/python Sample/S1mvp.py` from source, or the installed

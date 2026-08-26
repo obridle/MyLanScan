@@ -43,10 +43,18 @@ import customtkinter as ctk
 # Knowledge tables
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "0.2.7"
+APP_VERSION = "0.3.0"
 
 # Changelog shown in Help → Release Notes. Newest first.
 RELEASES: list[dict[str, object]] = [
+    {
+        "version": "0.3.0",
+        "date": "2026-08-26",
+        "added": ["Linux support (x86_64 + arm64): discovery via iproute2/ip "
+                  "neigh, IPv6 via ping -6, OS detection elevation via "
+                  "pkexec, nmap from /usr/bin"],
+        "fixed": [],
+    },
     {
         "version": "0.2.7",
         "date": "2026-08-22",
@@ -517,6 +525,15 @@ class Scanner(threading.Thread):
     # ---------------- IPv6 (link-local discovery + NDP join) ----------------
     @staticmethod
     def _default_iface() -> str:
+        if sys.platform.startswith("linux"):
+            try:
+                out = subprocess.run(["ip", "route", "show", "default"],
+                                     capture_output=True, text=True, timeout=3).stdout
+                # e.g. "default via 192.168.1.1 dev enp0s3 proto dhcp metric 100"
+                m = re.search(r"dev\s+(\S+)", out)
+                return m.group(1) if m else ""
+            except Exception:
+                return ""
         try:
             out = subprocess.run(["route", "-n", "get", "default"],
                                  capture_output=True, text=True, timeout=3).stdout
@@ -527,9 +544,35 @@ class Scanner(threading.Thread):
 
     @staticmethod
     def _ndp_table() -> dict[str, str]:
-        """MAC -> IPv6 (global preferred over link-local), from `ndp -an`.
-        NOTE: -n is required — plain `ndp -a` hangs resolving names."""
+        """MAC -> IPv6 (global preferred over link-local), from the OS neighbour
+        table. NOTE: macOS needs `ndp -an` (plain `ndp -a` hangs resolving names)."""
         out: dict[str, str] = {}
+        if sys.platform.startswith("linux"):
+            try:
+                text = subprocess.run(["ip", "-6", "neigh", "show"],
+                                      capture_output=True, text=True,
+                                      timeout=5).stdout
+            except Exception:
+                return out
+            # e.g. "fe80::abcd:1234 dev enp0s3 lladdr aa:bb:cc:dd:ee:ff STALE"
+            for line in text.splitlines():
+                f = line.split()
+                if len(f) < 2 or "lladdr" not in f or f[0] == "fe80::1%":
+                    continue
+                try:
+                    v6 = ipaddress.IPv6Address(f[0]).exploded
+                except ValueError:
+                    continue
+                mac = ""
+                for i, tok in enumerate(f):
+                    if tok == "lladdr" and i + 1 < len(f):
+                        mac = _norm_mac(f[i + 1])
+                if not mac:
+                    continue
+                cur = out.get(mac)
+                if cur is None or (cur.startswith("fe80") and not v6.lower().startswith("fe80")):
+                    out[mac] = v6
+            return out
         try:
             text = subprocess.run(["ndp", "-an"], capture_output=True,
                                   text=True, timeout=5).stdout
@@ -562,13 +605,16 @@ class Scanner(threading.Thread):
         if not iface:
             return
         self.q.put(("status", f"Probing IPv6 neighbors on {iface} …"))
+        if sys.platform.startswith("linux"):
+            cmd = ["ping", "-6", "-I", iface, "-c", "3", "-i", "0.3", "ff02::1"]
+        else:
+            cmd = ["ping6", "-n", "-c", "3", "-i", "0.3", f"ff02::1%{iface}"]
         proc = subprocess.Popen(
-            ["ping6", "-n", "-c", "3", "-i", "0.3", f"ff02::1%{iface}"],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         try:
             out, _ = proc.communicate(timeout=4.0)
         except subprocess.TimeoutExpired:
-            proc.kill()          # multicast ping6 never exits on its own
+            proc.kill()          # macOS multicast ping6 never exits on its own
             out, _ = proc.communicate()
         ndp = self._ndp_table()
 
@@ -618,7 +664,26 @@ class Scanner(threading.Thread):
 
     @staticmethod
     def _arp_for(ip: str) -> str:
-        """MAC for a single host, straight from the ARP cache ('' if absent)."""
+        """MAC for a single host, straight from the ARP/neighbour cache ('' if absent)."""
+        if sys.platform.startswith("linux"):
+            # `ip neigh` is the modern tool; format: 192.168.1.5 dev enp0s3 lladdr aa:bb:cc:dd:ee:ff REACHABLE
+            try:
+                out = subprocess.run(["ip", "neigh", "show", ip],
+                                     capture_output=True, text=True, timeout=3).stdout
+            except Exception:
+                return ""
+            m = re.search(r"lladdr\s+([0-9a-fA-F]{1,2}(?::[0-9a-fA-F]{1,2}){5})", out)
+            if m:
+                return _norm_mac(m.group(1))
+            # fallback: net-tools `arp -n`
+            try:
+                out = subprocess.run(["arp", "-n", ip], capture_output=True,
+                                     text=True, timeout=3).stdout
+            except Exception:
+                return ""
+            # Linux arp(8): 192.168.1.5   ether   aa:bb:cc:dd:ee:ff  C  enp0s3
+            m = re.search(r"ether\s+([0-9a-fA-F]{1,2}(?::[0-9a-fA-F]{1,2}){5})", out)
+            return _norm_mac(m.group(1)) if m else ""
         try:
             out = subprocess.run(["arp", "-n", ip], capture_output=True,
                                  text=True, timeout=3).stdout
@@ -917,7 +982,10 @@ def _find_nmap() -> str | None:
         return found
     for cand in ("/opt/homebrew/bin/nmap",     # Apple Silicon Homebrew
                  "/usr/local/bin/nmap",        # Intel Homebrew
-                 "/opt/local/bin/nmap"):       # MacPorts
+                 "/opt/local/bin/nmap",        # MacPorts
+                 "/usr/bin/nmap",              # Debian/Ubuntu
+                 "/usr/sbin/nmap",             # some distros keep it under sbin
+                 "/bin/nmap"):                 # fallback
         if os.path.exists(cand):
             return cand
     return None
@@ -1001,8 +1069,9 @@ class NmapScanner(threading.Thread):
         self.q.put(("done", rc))
 
     def _run_elevated(self):
-        """Run nmap as root via the macOS native admin prompt. The elevated
-        command writes its output to a temp file we tail for live streaming."""
+        """Run nmap as root via the native admin prompt — macOS osascript or
+        Linux pkexec. The elevated command writes its output to a temp file we
+        tail for live streaming."""
         args = build_nmap_args(self.ip, self.service, self.scripts,
                                True, self.ports)
         if self.bin_path:
@@ -1012,11 +1081,17 @@ class NmapScanner(threading.Thread):
         os.close(fd)
         try:
             quoted = " ".join(shlex.quote(a) for a in args)
-            script = (f"do shell script \"{quoted} > {shlex.quote(out_path)} 2>&1\" "
-                      "with administrator privileges")
+            redir = f"> {shlex.quote(out_path)} 2>&1"
+            if sys.platform.startswith("linux"):
+                # pkexec shows the graphical PolicyKit password prompt; it
+                # doesn't run a shell by default, so wrap the redirect in sh -c.
+                cmd = ["pkexec", "sh", "-c", f"{quoted} {redir}"]
+            else:
+                script = (f"do shell script \"{quoted} {redir}\" "
+                          "with administrator privileges")
+                cmd = ["osascript", "-e", script]
             try:
-                self.proc = subprocess.Popen(["osascript", "-e", script],
-                                             stdout=subprocess.PIPE,
+                self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                              stderr=subprocess.PIPE, text=True)
             except OSError as e:
                 self.q.put(("err", f"Could not elevate nmap: {e}"))
@@ -1310,21 +1385,22 @@ class App(ctk.CTk):
 
     # ---------------- layout ----------------
     def _build_menubar(self):
-        """Native macOS menu bar: application menu (About) + Help slot.
-
-        NOTE: the Help cascade must NOT use name="help" — Tk/aqua auto-fills a
-        menu with that name, duplicating our items on macOS.
-        """
+        """Application menu (About) + Help menu.
+        macOS: the first cascade becomes the app menu next to the  logo;
+        other platforms: it's a labelled menu inside the window.
+        NOTE: on macOS the Help cascade must NOT use name="help" — Tk/aqua
+        auto-fills a menu with that name, duplicating our items."""
+        is_mac = sys.platform == "darwin"
         m = tkMenu(self)
 
-        app_menu = tkMenu(m, name="apple")
+        app_menu = tkMenu(m, name="apple" if is_mac else None)
         app_menu.add_command(label="About MyLanScan",
                              command=lambda: HelpDialog(self))
-        m.add_cascade(menu=app_menu)
+        m.add_cascade(label="" if is_mac else "MyLanScan", menu=app_menu)
 
         help_menu = tkMenu(m, tearoff=0)
         help_menu.add_command(label="MyLanScan Help",
-                              accelerator="Cmd+?",
+                              accelerator="Ctrl+?" if not is_mac else "Cmd+?",
                               command=lambda: HelpDialog(self))
         help_menu.add_command(label="Release Notes",
                               command=lambda: ReleaseNotesDialog(self))
@@ -1333,6 +1409,8 @@ class App(ctk.CTk):
         self.config(menu=m)
         self._menubar = m   # reuse on dialogs so they keep the main-page menu
         self.bind_all("<Command-question>", lambda _e: HelpDialog(self))
+        if not is_mac:
+            self.bind_all("<Control-question>", lambda _e: HelpDialog(self))
 
     def _build_topbar(self):
         top = ctk.CTkFrame(self)

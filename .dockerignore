@@ -1,0 +1,9 @@
+venv/
+.build-venv/
+build/
+dist/
+dist-linux/
+*.dmg
+*.zip
+__pycache__/
+.git/
