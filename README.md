@@ -9,7 +9,7 @@ Prebuilt, self-contained releases are on the
 
 | Platform | Artifact | Install |
 |---|---|---|
-| macOS (Apple Silicon) | `MyLanScan-macos-arm64.dmg` | Open the DMG, drag **MyLanScan** to **Applications**, then right-click → **Open** once (unsigned build). |
+| macOS (Apple Silicon) | `MyLanScan-macos-arm64.dmg` | Open the DMG, drag **MyLanScan** to **Applications** — then see [macOS install notes](#macos-dmg) for the one-time Gatekeeper step (unsigned build). |
 | Linux x86_64 | `MyLanScan-linux-x86_64` | `chmod +x MyLanScan-linux-x86_64 && ./MyLanScan-linux-x86_64` |
 | Linux arm64 | `MyLanScan-linux-aarch64` | Raspberry Pi OS, arm64 VMs — same as above. |
 
@@ -100,22 +100,38 @@ To redesign it: edit `Sample/assets/make_icon.py` (Pillow, radar theme) then run
 `venv/bin/python Sample/assets/make_icon.py` to regenerate the `.icns` before rebuilding.
 
 **Installing (recipients):**
-1. Open the `.dmg`, drag **MyLanScan** onto the **Applications** shortcut, eject
-2. Right-click the app → **Open** once (unsigned build — Gatekeeper asks)
-3. After that it launches like any normal app. No Python or other dependencies.
+1. Open the `.dmg`, drag **MyLanScan** onto the **Applications** shortcut, eject.
+2. First launch — **macOS Sequoia (15) and later**:
+   1. Double-click **MyLanScan**. macOS blocks it and offers to move it to the Bin —
+      click **Done** / **Cancel**, do *not* move it to the Bin.
+   2. Open **System Settings → Privacy & Security** and scroll to the **Security**
+      section. Click **Open Anyway** next to the message that MyLanScan was blocked.
+   3. Enter your login password, then click **Open**. You only do this once.
+3. First launch — **macOS Sonoma (14) and earlier**: Control-click (or right-click)
+   the app → **Open** → **Open**.
+4. After the first successful launch it opens like any other app. No Python or other
+   dependencies needed.
 
-Apple Silicon Macs only. The app is **ad-hoc code-signed** in the build script —
-this avoids the "app is damaged" error when files are downloaded/transferred.
-It is *not* notarized (no paid Apple Developer account), so the first launch still
-shows "cannot verify developer": right-click → **Open** once. If a recipient ever
-sees "damaged" anyway, they can clear the download quarantine tag:
+> **Why this is needed / Sequoia changed the steps.** MyLanScan is **ad-hoc signed**
+> (which avoids the "app is damaged" error) but *not notarized* — that needs a paid
+> Apple Developer account. Since **macOS Sequoia (15)**, the old
+> Control-click → **Open** shortcut **no longer bypasses Gatekeeper**, and on
+> **macOS 15.1** the **Open Anyway** button may not even appear. If you're stuck:
+>
+> - Remove the download quarantine flag, then launch again:
+>
+>   ```sh
+>   xattr -dr com.apple.quarantine /Applications/MyLanScan.app
+>   ```
+>
+> - Or re-try the System Settings route: attempt to open the app once, then go to
+>   **Privacy & Security → Security → Open Anyway** (the button is available for about
+>   an hour after the attempt).
+>
+> The reliable long-term fix is an Apple **Developer ID** (paid) plus notarization,
+> which removes all of these prompts.
 
-```sh
-xattr -dr com.apple.quarantine /Applications/MyLanScan.app
-```
-
-For a fully warning-free public release you'd need an Apple Developer ID
-($99/yr) plus codesign with that identity and notarization.
+Apple Silicon Macs only (the build is `arm64`).
 
 ### Linux (Docker)
 

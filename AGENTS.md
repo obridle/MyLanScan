@@ -17,14 +17,19 @@ The repo is public and releases are published by `.github/workflows/release.yml`
 Build: `./build_package.sh` → `MyLanScan-macos-arm64.dmg` (~28 MB).
 Uses a throwaway `.build-venv` with only shipping deps (customtkinter, zeroconf,
 pyinstaller — no scapy/PySide6). Verified: bundled app launches, oui.json lands in
-Contents/Frameworks and loads via sys._MEIPASS.
+Contents/Frameworks and loads via sys._MEIPASS. The script stages only
+`MyLanScan.app` into a throwaway `.dmg-stage/` before creating the DMG, so the
+mounted volume doesn't also show PyInstaller's onedir `dist/MyLanScan/` folder.
 
 **Code signing**: PyInstaller ad-hoc signs the bundle, but stamping Info.plist after
 the build invalidates that signature — the build script therefore re-runs
 `codesign --force --deep --sign -` and verifies. This fixes the Gatekeeper "app is
-damaged" error on downloads. Ad-hoc (no Developer ID) still means recipients need
-right-click → Open once; fallback `xattr -dr com.apple.quarantine <app>`. Rebuild
-after any S1mvp.py change.
+damaged" error on downloads. Ad-hoc (no Developer ID) still means recipients must
+override Gatekeeper once on first launch: on **macOS Sequoia (15)+** the Control-click
+→ Open shortcut no longer works — use System Settings → Privacy & Security →
+Security → Open Anyway (button appears only ~1 h after a launch attempt), or
+`xattr -dr com.apple.quarantine <app>` as fallback; macOS 15.1 sometimes hides
+Open Anyway entirely. Rebuild after any S1mvp.py change.
 
 ## Scope (feature baseline)
 

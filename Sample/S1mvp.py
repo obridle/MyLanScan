@@ -43,10 +43,19 @@ import customtkinter as ctk
 # Knowledge tables
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.3.1"
 
 # Changelog shown in Help → Release Notes. Newest first.
 RELEASES: list[dict[str, object]] = [
+    {
+        "version": "0.3.1",
+        "date": "2026-09-11",
+        "added": ["First-launch instructions for macOS Sequoia (15+): Apple "
+                  "removed the Control-click → Open bypass, so the app now "
+                  "documents System Settings → Privacy & Security → Open Anyway"],
+        "fixed": ["macOS DMG now ships only MyLanScan.app — PyInstaller's extra "
+                  "on-dir folder no longer appears on the mounted volume"],
+    },
     {
         "version": "0.3.0",
         "date": "2026-08-26",

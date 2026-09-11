@@ -8,12 +8,13 @@ cd "$(dirname "$0")"
 
 APP_NAME=MyLanScan
 BUILD_VENV=.build-venv
+STAGE=.dmg-stage
 DMG="$APP_NAME-macos-arm64.dmg"
 ICON=Sample/assets/MyLanScan.icns
 APP_VERSION="$(sed -n 's/^APP_VERSION = "\(.*\)"/\1/p' Sample/S1mvp.py | head -1)"
 
 echo "== cleaning previous artifacts =="
-rm -rf "$BUILD_VENV" build dist "$DMG"
+rm -rf "$BUILD_VENV" build dist "$STAGE" "$DMG"
 
 echo "== creating throwaway build venv (shipping deps only: no scapy/PySide6) =="
 venv/bin/python -m venv "$BUILD_VENV"
@@ -47,6 +48,13 @@ echo "== ad-hoc signing (fixes Gatekeeper 'app is damaged') =="
 codesign --force --deep --sign - "dist/$APP_NAME.app"
 codesign --verify --deep --strict "dist/$APP_NAME.app"
 
+# PyInstaller's onedir output also leaves dist/MyLanScan/ next to the .app.
+# Stage only the .app so the mounted DMG shows just the app + Applications link.
+echo "== staging the app for the DMG =="
+rm -rf "$STAGE"
+mkdir -p "$STAGE"
+cp -R "dist/$APP_NAME.app" "$STAGE/"
+
 echo "== creating DMG =="
 if command -v create-dmg >/dev/null 2>&1; then
     # create-dmg can exit non-zero on harmless Finder AppleScript hiccups
@@ -56,12 +64,13 @@ if command -v create-dmg >/dev/null 2>&1; then
         --app-drop-link 420 170 \
         --volicon "$ICON" \
         --window-size 620 360 \
-        "$DMG" dist/ || test -f "$DMG"
+        "$DMG" "$STAGE" || test -f "$DMG"
 else
     echo "(create-dmg not found — using plain hdiutil layout)"
-    hdiutil create -volname "$APP_NAME" -srcfolder dist -format UDZO -ov "$DMG"
+    hdiutil create -volname "$APP_NAME" -srcfolder "$STAGE" -format UDZO -ov "$DMG"
 fi
+rm -rf "$STAGE"
 
 echo "== done =="
 ls -lh "dist/$APP_NAME.app" "$DMG"
-echo "Ship:  $DMG   (recipients: mount, drag to Applications, right-click -> Open once)"
+echo "Ship:  $DMG   (recipients: mount, drag to Applications, then see the README's macOS install notes)"

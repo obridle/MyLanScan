@@ -8,6 +8,7 @@ venv/
 build/
 dist/
 dist-linux/
+.dmg-stage/
 *.spec
 
 # Distributables
