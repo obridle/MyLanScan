@@ -38,14 +38,22 @@ check("kind_from_service AirPlay", m.kind_from_service("_airplay._tcp.local.") =
 check("kind_from_service companion", m.kind_from_service("_companion-link._tcp.local.") == "iPhone/iPad")
 check("kind_from_service printer", m.kind_from_service("_ipp._tcp.local.") == "Printer")
 check("kind_from_service fallback", m.kind_from_service("_odd._tcp.local.") == "mDNS device")
-mdns = m.mdns_discover(browse_secs=2.0)
-check("mdns_discover runs unprivileged", isinstance(mdns, dict))
-if mdns:
-    ip, (host, svc) = next(iter(mdns.items()))
-    check("mdns entry has host+service", bool(host) and "_" in svc,
-          f"{ip} {host} {svc}")
-else:
-    print("SKIP  mdns entry (quiet LAN)")
+
+# Live, network-dependent checks are skipped in CI / on hosts with no LAN.
+# Pure-logic checks (above and below) and the loopback port scan still run.
+SKIP_LIVE = os.environ.get("MYLANSCAN_SKIP_LIVE", "") not in ("", "0", "false")
+if SKIP_LIVE:
+    print("SKIP  live network checks (MYLANSCAN_SKIP_LIVE set)")
+
+if not SKIP_LIVE:
+    mdns = m.mdns_discover(browse_secs=2.0)
+    check("mdns_discover runs unprivileged", isinstance(mdns, dict))
+    if mdns:
+        ip, (host, svc) = next(iter(mdns.items()))
+        check("mdns entry has host+service", bool(host) and "_" in svc,
+              f"{ip} {host} {svc}")
+    else:
+        print("SKIP  mdns entry (quiet LAN)")
 
 # --- _record merge dedupe: Bonjour-first device gaining a MAC stays one row ---
 import threading as _threading
@@ -88,76 +96,77 @@ except OSError as e:
     print(f"INFO  gethostbyname failed: {e}")
 
 # --- live ping-sweep scan of the real local /24 (headless, UI-independent) ---
-local_ip = None
-try:
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.connect(("8.8.8.8", 80))
-    local_ip = s.getsockname()[0]
-    s.close()
-except OSError:
-    pass
-net = ipaddress.ip_network(f"{local_ip}/24", strict=False)
-q = queue.Queue()
-sc = m.Scanner(net, q, mode="ping", workers=100)
-sc.start()
-devices, statuses = {}, []
-deadline = time.time() + 90
-while time.time() < deadline:
+if not SKIP_LIVE:
+    local_ip = None
     try:
-        kind, payload = q.get(timeout=1)
-    except queue.Empty:
-        if not sc.is_alive():
-            break
-        continue
-    if kind == "device":
-        devices[payload.key] = payload
-    elif kind == "status":
-        statuses.append(payload)
-        if kind == "done":
-            break
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+    except OSError:
+        pass
+    net = ipaddress.ip_network(f"{local_ip}/24", strict=False)
+    q = queue.Queue()
+    sc = m.Scanner(net, q, mode="ping", workers=100)
+    sc.start()
+    devices, statuses = {}, []
+    deadline = time.time() + 90
+    while time.time() < deadline:
+        try:
+            kind, payload = q.get(timeout=1)
+        except queue.Empty:
+            if not sc.is_alive():
+                break
+            continue
+        if kind == "device":
+            devices[payload.key] = payload
+        elif kind == "status":
+            statuses.append(payload)
+            if kind == "done":
+                break
 
-print("\n--- live scan events ---")
-for s_ in statuses:
-    print(f"      status: {s_}")
-print(f"INFO  devices found: {len(devices)}")
-for d in sorted(devices.values(), key=lambda d: m.ip_sort_key(d.ip)):
-    print(f"      {d.ip:>15}  {d.mac or '-':<17}  {d.vendor or '-':<18} {d.kind or '-'}")
+    print("\n--- live scan events ---")
+    for s_ in statuses:
+        print(f"      status: {s_}")
+    print(f"INFO  devices found: {len(devices)}")
+    for d in sorted(devices.values(), key=lambda d: m.ip_sort_key(d.ip)):
+        print(f"      {d.ip:>15}  {d.mac or '-':<17}  {d.vendor or '-':<18} {d.kind or '-'}")
 
-check("scan found >=1 device", len(devices) >= 1)
+    check("scan found >=1 device", len(devices) >= 1)
 
-# --- name resolution (DNS PTR + mDNS) ---
-named = [d for d in devices.values() if d.name]
-print(f"INFO  named devices: {len(named)}/{len(devices)}")
-for d in sorted(named, key=lambda d: m.ip_sort_key(d.ip))[:8]:
-    print(f"      {d.ip:>15}  {d.name}")
-if named:
-    check("names resolved (DNS/mDNS)", True, f"{len(named)} named")
-else:
-    print("NOTE  no names resolved — network-dependent; not a hard failure.")
+    # --- name resolution (DNS PTR + mDNS) ---
+    named = [d for d in devices.values() if d.name]
+    print(f"INFO  named devices: {len(named)}/{len(devices)}")
+    for d in sorted(named, key=lambda d: m.ip_sort_key(d.ip))[:8]:
+        print(f"      {d.ip:>15}  {d.name}")
+    if named:
+        check("names resolved (DNS/mDNS)", True, f"{len(named)} named")
+    else:
+        print("NOTE  no names resolved — network-dependent; not a hard failure.")
 
-# --- IPv6 (multicast ping6 + NDP join) ---
-v6 = [d for d in devices.values() if d.ipv6]
-print(f"INFO  devices with IPv6: {len(v6)}/{len(devices)}")
-for d in sorted(v6, key=lambda d: m.ip_sort_key(d.ip))[:5]:
-    print(f"      {d.ip:>15}  {d.ipv6}")
-if v6:
-    check("IPv6 joined", True, f"{len(v6)} hosts")
-else:
-    print("NOTE  no IPv6 joined — network-dependent (needs v6 traffic/NDP entries).")
+    # --- IPv6 (multicast ping6 + NDP join) ---
+    v6 = [d for d in devices.values() if d.ipv6]
+    print(f"INFO  devices with IPv6: {len(v6)}/{len(devices)}")
+    for d in sorted(v6, key=lambda d: m.ip_sort_key(d.ip))[:5]:
+        print(f"      {d.ip:>15}  {d.ipv6}")
+    if v6:
+        check("IPv6 joined", True, f"{len(v6)} hosts")
+    else:
+        print("NOTE  no IPv6 joined — network-dependent (needs v6 traffic/NDP entries).")
 
-# --- ARP table after the sweep (cache now warm) ---
-table = m.Scanner._arp_table()
-print(f"INFO  _arp_table() entries after scan: {len(table)}")
-check("arp table parsed", len(table) > 0)
-joined = sum(1 for d in devices.values() if d.mac)
-check("MACs joined to devices", joined > 0, f"{joined}/{len(devices)}")
+    # --- ARP table after the sweep (cache now warm) ---
+    table = m.Scanner._arp_table()
+    print(f"INFO  _arp_table() entries after scan: {len(table)}")
+    check("arp table parsed", len(table) > 0)
+    joined = sum(1 for d in devices.values() if d.mac)
+    check("MACs joined to devices", joined > 0, f"{joined}/{len(devices)}")
 
-me = next((d for d in devices.values() if d.ip == local_ip), None)
-if me is None:
-    print(f"NOTE  own host {local_ip} absent — this Mac drops ICMP echo (firewall stealth mode); "
-          "ping-sweep cannot see stealth hosts. Not a code bug.")
-else:
-    check("own host in results", True)
+    me = next((d for d in devices.values() if d.ip == local_ip), None)
+    if me is None:
+        print(f"NOTE  own host {local_ip} absent — this Mac drops ICMP echo (firewall stealth mode); "
+              "ping-sweep cannot see stealth hosts. Not a code bug.")
+    else:
+        check("own host in results", True)
 
 # --- port scan (TCP connect) against local listeners ---
 import socket as _socket
@@ -207,3 +216,4 @@ else:
     print("SKIP  nmap scanner e2e (nmap not installed — brew install nmap)")
 
 print("\n" + ("ALL PASS" if not fails else f"FAILURES: {fails}"))
+sys.exit(1 if fails else 0)

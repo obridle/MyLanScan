@@ -2,6 +2,21 @@
 
 LAN scanner for **macOS and Linux** — feature parity with LanScan. Python + customtkinter desktop app.
 
+## Download
+
+Prebuilt, self-contained releases are on the
+[Releases page](https://github.com/obridle/MyLanScan/releases/latest) — no Python required.
+
+| Platform | Artifact | Install |
+|---|---|---|
+| macOS (Apple Silicon) | `MyLanScan-macos-arm64.dmg` | Open the DMG, drag **MyLanScan** to **Applications**, then right-click → **Open** once (unsigned build). |
+| Linux x86_64 | `MyLanScan-linux-x86_64` | `chmod +x MyLanScan-linux-x86_64 && ./MyLanScan-linux-x86_64` |
+| Linux arm64 | `MyLanScan-linux-aarch64` | Raspberry Pi OS, arm64 VMs — same as above. |
+
+Verify your download against `SHA256SUMS.txt` (also on the Releases page). Deep scan needs
+nmap installed (`brew install nmap` / `sudo apt install nmap`). The macOS build is Apple
+Silicon only; the Linux binaries need Debian 12+ / Ubuntu 22.04+ or newer.
+
 ## Features (current)
 
 - **Host discovery** on the local subnet: ping sweep + per-host ARP lookup, plus
@@ -40,6 +55,27 @@ Tests: `venv/bin/python Sample/S1mvp_test.py` (headless logic checks + live /24 
 Two build scripts, one per platform — both produce self-contained artifacts with no
 Python required on the recipient's machine. Rebuild after every source change; the
 artifacts are snapshots, not live links.
+
+### Cutting a release (CI)
+
+Releases are built and published by [`.github/workflows/release.yml`](.github/workflows/release.yml).
+Pushing a version tag is all it takes:
+
+1. Bump `APP_VERSION` and add a matching entry to the `RELEASES` changelog in `Sample/S1mvp.py`
+2. Run the tests locally: `venv/bin/python Sample/S1mvp_test.py`
+3. Commit, then tag and push:
+
+   ```sh
+   git tag -a v0.3.0 -m "v0.3.0"
+   git push origin v0.3.0
+   ```
+
+4. CI runs the test job, builds the macOS DMG and both Linux binaries, and publishes a
+   Release with `SHA256SUMS.txt` attached. The test job fails if the tag doesn't match
+   `APP_VERSION`, so the two can never drift.
+
+The per-platform sections below describe the same builds run locally (useful for a
+pre-release smoke test or when CI is unavailable).
 
 ### macOS (DMG)
 

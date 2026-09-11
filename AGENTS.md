@@ -7,7 +7,10 @@ No package layout/lint config yet. When tooling lands, replace this section with
 commands and delete anything stale below.
 
 Verified so far: `venv/bin/python Sample/S1mvp_test.py` (headless logic + live /24 sweep)
-and a GUI smoke test both pass on this Mac.
+and a GUI smoke test both pass on this Mac. On CI / offline, run the pure-logic subset
+with `MYLANSCAN_SKIP_LIVE=1` (the test exits non-zero on any failure).
+The repo is public and releases are published by `.github/workflows/release.yml`
+(see Conventions).
 
 ## Distribution (Apple Silicon, unsigned)
 
@@ -95,10 +98,17 @@ None established yet. First implementation should pick: package layout (`src/myl
 formatter/linter (suggest ruff), and test runner (pytest) — then record them here with exact commands.
 
 Releases: app version lives in `APP_VERSION` at the top of `Sample/S1mvp.py` (shown in
-window title + Help dialog). Bump it, rerun tests, rebuild the DMG. `build_package.sh`
-stamps the version into Info.plist automatically and bundles the app + volume icons
-from `Sample/assets/MyLanScan.icns` (regenerate with `Sample/assets/make_icon.py`,
-needs pillow in the main venv — dev-only).
+window title + Help dialog). The GitHub repo is **public**; releases are published by
+`.github/workflows/release.yml` — bump `APP_VERSION` and add a matching `RELEASES`
+changelog entry, run `venv/bin/python Sample/S1mvp_test.py`, commit, then
+`git tag -a vX.Y.Z -m vX.Y.Z && git push origin vX.Y.Z`. CI builds the macOS DMG
+(`macos-14`, Homebrew python-tk) and both Linux binaries (`ubuntu-22.04` + Docker/QEMU,
+Debian base for glibc compatibility), then attaches them plus `SHA256SUMS.txt` to a
+Release; it fails if the tag and `APP_VERSION` disagree. `build_package.sh` stamps the
+version into Info.plist automatically and bundles the app + volume icons from
+`Sample/assets/MyLanScan.icns` (regenerate with `Sample/assets/make_icon.py`,
+needs pillow in the main venv — dev-only). The test suite honours `MYLANSCAN_SKIP_LIVE=1`
+to skip network-dependent checks and exits non-zero on failure (the CI gate).
 
 Testing approach (user-directed): build small sample code to exercise each base feature as
 it lands — verify discovery, port scan, service ID, etc. incrementally rather than testing
