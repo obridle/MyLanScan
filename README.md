@@ -97,9 +97,13 @@ dist-linux/MyLanScan-linux-aarch64    # ARM (Raspberry Pi OS, Apple-silicon VMsâ
 
 **Release checklist:**
 1. Make your changes to `Sample/S1mvp.py`
-2. Run the test suite on a Linux container: `docker run --rm -v "$PWD":/src debian:bookworm-slim bash -c "apt-get update && apt-get install -y python3 python3-tk python3-pip nmap && pip install --break-system-packages customtkinter zeroconf && cd /src && python3 Sample/S1mvp_test.py"`
+2. Run the test suite on a Linux container:
+   `docker run --rm -v "$PWD":/src debian:bookworm-slim bash -c "apt-get update && apt-get install -y python3 python3-tk python3-pip nmap && pip install --break-system-packages customtkinter zeroconf scapy && cd /src && python3 Sample/S1mvp_test.py"`
+   > All pure-logic checks must PASS. `scan found >=1 device` and `MACs joined`
+   > are network-dependent and legitimately FAIL inside an isolated container â€”
+   > they need to reach your LAN, so run those on a real machine.
 3. Rebuild: `./build_package_linux.sh`
-4. Smoke-test: launch the binary under X (`xvfb-run -a ./MyLanScan`)
+4. Smoke-test: launch the binary under X (`xvfb-run -a ./dist-linux/MyLanScan-linux-aarch64`)
 5. Zip/tar the binary and send to recipients
 
 **Installing (recipients):** download the right binary for their machine and run it
