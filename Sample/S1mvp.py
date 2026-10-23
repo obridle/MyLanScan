@@ -43,10 +43,18 @@ import customtkinter as ctk
 # Knowledge tables
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "0.3.1"
+APP_VERSION = "0.3.2"
 
 # Changelog shown in Help → Release Notes. Newest first.
 RELEASES: list[dict[str, object]] = [
+    {
+        "version": "0.3.2",
+        "date": "2026-10-23",
+        "added": ["macOS release pipeline now supports Developer ID signing and "
+                  "Apple notarization: notarized DMGs open with a normal "
+                  "double-click, with no Gatekeeper 'Open Anyway' step"],
+        "fixed": [],
+    },
     {
         "version": "0.3.1",
         "date": "2026-09-11",
