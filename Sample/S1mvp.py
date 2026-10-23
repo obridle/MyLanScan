@@ -51,8 +51,9 @@ RELEASES: list[dict[str, object]] = [
         "version": "0.3.2",
         "date": "2026-10-23",
         "added": ["macOS release pipeline now supports Developer ID signing and "
-                  "Apple notarization: notarized DMGs open with a normal "
-                  "double-click, with no Gatekeeper 'Open Anyway' step"],
+                  "Apple notarization (enabled once Apple credentials are "
+                  "configured); current builds remain ad-hoc signed and need "
+                  "the one-time Gatekeeper approval described in the README"],
         "fixed": [],
     },
     {

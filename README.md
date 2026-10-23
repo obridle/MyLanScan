@@ -9,9 +9,29 @@ Prebuilt, self-contained releases are on the
 
 | Platform | Artifact | Install |
 |---|---|---|
-| macOS (Apple Silicon) | `MyLanScan-macos-arm64.dmg` | Open the DMG, drag **MyLanScan** to **Applications**, and launch — notarized releases open directly. See [macOS install notes](#macos-dmg) if you run an unsigned build. |
+| macOS (Apple Silicon) | `MyLanScan-macos-arm64.dmg` | Open the DMG and drag to **Applications**, then approve the first launch (ad-hoc signed) — or use the [one-command installer](#macos-one-command-install). |
 | Linux x86_64 | `MyLanScan-linux-x86_64` | `chmod +x MyLanScan-linux-x86_64 && ./MyLanScan-linux-x86_64` |
 | Linux arm64 | `MyLanScan-linux-aarch64` | Raspberry Pi OS, arm64 VMs — same as above. |
+
+### macOS: one-command install
+
+If Gatekeeper blocks the app — on Sequoia 15.1 the **Open Anyway** button can be
+missing entirely — this installs it for you: it downloads the latest release,
+copies it to `/Applications`, clears the quarantine flag, and launches it.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/obridle/MyLanScan/main/install_macos.sh | bash
+```
+
+Prefer to read the script first? Fetch it from the repo:
+
+```sh
+curl -fsSLO https://raw.githubusercontent.com/obridle/MyLanScan/main/install_macos.sh
+less install_macos.sh
+bash install_macos.sh
+```
+
+Install a specific version with `bash install_macos.sh v0.3.2`.
 
 Verify your download against `SHA256SUMS.txt` (also on the Releases page). Deep scan needs
 nmap installed (`brew install nmap` / `sudo apt install nmap`). The macOS build is Apple
@@ -101,29 +121,33 @@ To redesign it: edit `Sample/assets/make_icon.py` (Pillow, radar theme) then run
 
 **Installing (recipients):**
 1. Open the `.dmg`, drag **MyLanScan** onto the **Applications** shortcut, eject.
-2. Double-click **MyLanScan**. Official releases are **Developer ID signed and
-   notarized by Apple**, so it opens directly — no security prompts, no Terminal.
-3. After the first launch it opens like any other app. No Python or other
+2. First launch — **macOS Sequoia (15) and later**:
+   1. Double-click **MyLanScan**. macOS blocks it and offers to move it to the Bin —
+      click **Done** / **Cancel**, do *not* move it to the Bin.
+   2. Open **System Settings → Privacy & Security** and scroll to the **Security**
+      section. Click **Open Anyway** next to the message that MyLanScan was blocked.
+   3. Enter your login password, then click **Open**. You only do this once.
+3. First launch — **macOS Sonoma (14) and earlier**: Control-click (or right-click)
+   the app → **Open** → **Open**.
+4. After the first successful launch it opens like any other app. No Python or other
    dependencies needed.
 
 Apple Silicon Macs only (the build is `arm64`).
 
-> **If Gatekeeper blocks the app.** This applies only to builds that aren't
-> notarized — older releases, or a local `./build_package.sh` run without Apple
-> credentials. Those are **ad-hoc signed** (which avoids the "app is damaged" error)
-> but still need a one-time approval:
+> **Why the manual step is still needed.** Release builds are **ad-hoc signed** (which
+> avoids the "app is damaged" error) but **not yet notarized** — Apple Developer ID
+> credentials aren't configured for the release pipeline yet. Since **macOS Sequoia
+> (15)** the old Control-click → **Open** bypass no longer works, and on **15.1** the
+> **Open Anyway** button may not appear. The easiest fix is the
+> [one-command installer](#macos-one-command-install) above; otherwise clear the
+> download quarantine flag and relaunch:
 >
-> - **macOS Sequoia (15) and later:** double-click the app, dismiss the "move to Bin"
->   prompt, then open **System Settings → Privacy & Security → Security** and click
->   **Open Anyway**. Since Sequoia the old Control-click → **Open** shortcut no longer
->   bypasses Gatekeeper, and on **15.1** the button may not appear.
-> - **macOS Sonoma (14) and earlier:** Control-click (or right-click) the app →
->   **Open** → **Open**.
-> - Last resort — clear the download quarantine flag, then relaunch:
+> ```sh
+> xattr -dr com.apple.quarantine /Applications/MyLanScan.app
+> ```
 >
->   ```sh
->   xattr -dr com.apple.quarantine /Applications/MyLanScan.app
->   ```
+> Once notarization is enabled (see below), the DMG opens with a normal double-click
+> and this step goes away.
 
 #### Signing & notarization (maintainers)
 
@@ -240,6 +264,7 @@ Released under the [MIT License](LICENSE) — Copyright (c) 2026 MyLanScan contr
 | `Sample/S1mvp_test.py` | headless validation incl. live /24 sweep |
 | `Sample/fetch_oui.py` | refreshes `Sample/oui.json` from IEEE |
 | `Sample/oui.json` | ~40k IEEE OUI entries (generated, do not edit) |
+| `install_macos.sh` | one-command macOS installer (download, install to /Applications, clear quarantine) |
 | `build_package.sh` | builds + (optionally) notarizes the macOS release DMG |
 | `build_package_linux.sh` | builds the Linux binaries (x86_64 + aarch64) via Docker |
 | `Dockerfile` | Debian-based Linux build image (system Python for tkinter) |
