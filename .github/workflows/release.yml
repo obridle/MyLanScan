@@ -47,6 +47,11 @@ jobs:
   build-macos:
     name: Build macOS DMG
     runs-on: macos-14
+    # Set APPLE_CERTIFICATE_BASE64 (base64 of a Developer ID Application .p12)
+    # to enable Developer ID signing + notarization. When unset, the build falls
+    # back to ad-hoc signing so the pipeline still works without Apple creds.
+    env:
+      APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
     steps:
       - uses: actions/checkout@v4
 
@@ -62,7 +67,36 @@ jobs:
       - name: Create build interpreter
         run: /opt/homebrew/bin/python3.12 -m venv venv
 
-      - name: Build DMG
+      - name: Import Developer ID certificate
+        if: env.APPLE_CERTIFICATE_BASE64 != ''
+        env:
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          CERT="$RUNNER_TEMP/cert.p12"
+          KEYCHAIN="$RUNNER_TEMP/app-signing.keychain-db"
+          echo "$APPLE_CERTIFICATE_BASE64" | base64 --decode > "$CERT"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$CERT" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychain -d user -s "$KEYCHAIN" $(security list-keychain -d user | tr -d '"')
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" \
+            | grep "Developer ID Application" | head -1 | cut -d'"' -f2)"
+          if [ -z "$IDENTITY" ]; then
+            echo "::error::No Developer ID Application identity in the imported certificate"
+            exit 1
+          fi
+          echo "Signing identity: $IDENTITY"
+          echo "SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+
+      - name: Build + notarize DMG
+        env:
+          NOTARY_APPLE_ID: ${{ secrets.APPLE_ID }}
+          NOTARY_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          NOTARY_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: ./build_package.sh
 
       - uses: actions/upload-artifact@v4
@@ -70,6 +104,10 @@ jobs:
           name: macos
           path: MyLanScan-macos-arm64.dmg
           if-no-files-found: error
+
+      - name: Delete temporary keychain
+        if: always() && env.APPLE_CERTIFICATE_BASE64 != ''
+        run: security delete-keychain "$RUNNER_TEMP/app-signing.keychain-db" || true
 
   build-linux:
     name: Build Linux binaries

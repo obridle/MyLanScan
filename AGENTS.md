@@ -21,15 +21,28 @@ Contents/Frameworks and loads via sys._MEIPASS. The script stages only
 `MyLanScan.app` into a throwaway `.dmg-stage/` before creating the DMG, so the
 mounted volume doesn't also show PyInstaller's onedir `dist/MyLanScan/` folder.
 
-**Code signing**: PyInstaller ad-hoc signs the bundle, but stamping Info.plist after
-the build invalidates that signature — the build script therefore re-runs
-`codesign --force --deep --sign -` and verifies. This fixes the Gatekeeper "app is
-damaged" error on downloads. Ad-hoc (no Developer ID) still means recipients must
-override Gatekeeper once on first launch: on **macOS Sequoia (15)+** the Control-click
-→ Open shortcut no longer works — use System Settings → Privacy & Security →
-Security → Open Anyway (button appears only ~1 h after a launch attempt), or
-`xattr -dr com.apple.quarantine <app>` as fallback; macOS 15.1 sometimes hides
-Open Anyway entirely. Rebuild after any S1mvp.py change.
+**Code signing**: PyInstaller signs the bundle, but stamping Info.plist after the
+build invalidates that signature — the build script re-signs afterwards. Behavior is
+selected by `SIGN_IDENTITY` (env, default `-` = ad-hoc):
+
+- **`-` (ad-hoc, the default):** `codesign --force --deep --sign -`; fixes the
+  Gatekeeper "app is damaged" error but recipients must still approve the first
+  launch. On **macOS Sequoia (15)+** the Control-click → Open shortcut no longer
+  works — use System Settings → Privacy & Security → Security → Open Anyway (button
+  appears only ~1 h after a launch attempt), or `xattr -dr com.apple.quarantine <app>`
+  as fallback; macOS 15.1 sometimes hides Open Anyway entirely.
+- **Developer ID:** PyInstaller signs nested binaries (`--codesign-identity`), then
+  the outer bundle is re-signed with `--options runtime` +
+  `Sample/assets/entitlements.plist` (hardened-runtime entitlements Python needs or
+  the notarized app crashes on launch). The DMG is then notarized with
+  `xcrun notarytool submit --wait` and the ticket stapled (`xcrun stapler staple`);
+  Gatekeeper then accepts it on a normal double-click. Needs Apple credentials:
+  `NOTARY_PROFILE`, or `NOTARY_APPLE_ID`/`NOTARY_PASSWORD`/`NOTARY_TEAM_ID`. The
+  release workflow imports a Developer ID `.p12` from repo secrets and sets these —
+  see the README's "Signing & notarization (maintainers)" for the secret names.
+  Without credentials the build still succeeds but warns and skips notarization.
+
+Rebuild after any S1mvp.py change.
 
 ## Scope (feature baseline)
 
