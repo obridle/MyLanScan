@@ -149,15 +149,27 @@ Gotchas proven on this network/Mac:
   interface in its own column (`2a02:…:d016   4a:f2:9c:d8:9c:5a    en0 17h S`). A parser
   requiring `"%" in fields[0]` drops every global entry — the fixed form is `_parse_ndp`,
   and that omission was the "no IPv6 at all" bug fixed in v0.3.3. 49 of 83 rows on this LAN.
-- **Restricted processes see fake MACs.** Run `arp -an` / `ndp -an` / `ifconfig en0` from a
-  sandboxed shell (OpenCode's own tool shell does this) and every link-layer address reads
-  `02:00:00:00:00:00` (`2:0:0:0:0:0` from ndp, `ether 02:00:00:00:00:00` from ifconfig)
-  while the IPv4 ARP table comes back empty — yet `ping`, mDNS and `networksetup
-  -listallhardwareports` all work. The same process run outside that sandbox (e.g. via
-  `launchctl submit`) sees the full table. So: never diagnose this as "macOS 27 redacts
-  MACs" without re-checking from an unrestricted process, and always filter the
-  `02:00:00:00:00:00` placeholder (`_is_placeholder_mac`) so it can't be shown as a real
-  MAC or turned into a bogus "Private MAC (randomized)" vendor.
+- **macOS 27 hides link-layer addresses from non-Apple code (the v0.3.4 fix).** It stops
+  handing MACs to any process that isn't an Apple platform binary, and **children inherit
+  that**, so `arp -an` run by the app returns 0 lines (not an error) and `ndp -an` /
+  `ifconfig en0` show `2:0:0:0:0:0` / `02:00:00:00:00:00`. Measured on 27.0.1 / 26A434:
+  - `/bin/sh` (Apple) reading `arp -an` → full table; Homebrew `python3.14` → 0 lines,
+    in the *same* host context, even under `launchd`, even when python is launched from
+    Terminal — so it is the process's own code identity, not the sandbox and not the
+    responsible process. Children of python stay blocked whichever form is used
+    (`arp`, `/usr/sbin/arp`, `sh -c`, `zsh -c`, `osascript do shell script`, `script`).
+  - **A job handed to launchd is spawned by launchd, not by us, and is not blocked**:
+    `launchctl submit -l x -- /bin/sh -c '/usr/sbin/arp -an > /tmp/f'` returns the real
+    table (43 entries with MACs). That is what `_helper_output` / `_helper_arp_table`
+    / `_helper_ndp_table` use — unprivileged, cached ~2.5 s, once per sweep, and only
+    when the direct read came back empty (`_HELPER_USED` records it for the status line).
+    It took 3/34 → 31/31 devices with a MAC in the restricted tool shell, so it is the
+    cheap way to reproduce/verify this without leaving the harness.
+  - Consequence: `arp` returning *nothing* is normal here. Never read that as "no
+    devices", and always drop the `02:00:00:00:00:00` placeholder (`_is_placeholder_mac`)
+    so it can't be shown as a real MAC or become a bogus "Private MAC (randomized)".
+  - `Help → Scan diagnostics` dumps all of the above for the running app; ask for it
+    before guessing when a user reports empty MAC/vendor.
 - **Bonjour TXT `deviceid` is a real MAC source** independent of ARP: `_airplay._tcp` and
   `_raop._tcp` publish it (RAOP instance names also start `AABBCCDDEEFF@`), verified for
   Sky Q boxes and this Mac. `_mac_from_mdns` uses it, which is how MACs still get filled

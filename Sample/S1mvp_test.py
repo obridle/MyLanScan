@@ -4,6 +4,7 @@ import ipaddress
 import os
 import queue
 import socket
+import subprocess
 import sys
 import time
 
@@ -77,6 +78,29 @@ check("_parse_ndp keeps link-local row with %iface",
 check("_parse_ndp blanks incomplete and placeholder MACs",
       list(NDP_ROWS.values()).count("") == 2)
 check("_parse_ndp skips the header row", len(NDP_ROWS) == 4)
+
+# --- arp parsing: both layouts, and never a placeholder or unresolved row ---
+ARP_SAMPLE = """\
+? (192.168.1.1) at 6c:a0:b4:de:29:e9 on en0 ifscope [ethernet]
+? (192.168.1.2) at (incomplete) on en0 ifscope [ethernet]
+? (192.168.1.3) at 02:00:00:00:00:00 on en0 ifscope [ethernet]
+? (192.168.1.4) at e0:98:6:da:33:3f on en0 ifscope [ethernet]
+"""
+ARP_ROWS = m._parse_arp(ARP_SAMPLE)
+check("_parse_arp reads a zero-stripped MAC",
+      ARP_ROWS.get("192.168.1.4") == "E0:98:06:DA:33:3F")
+check("_parse_arp drops unresolved rows", "192.168.1.2" not in ARP_ROWS)
+check("_parse_arp drops placeholder rows", "192.168.1.3" not in ARP_ROWS)
+check("_parse_arp found the real entries", len(ARP_ROWS) == 2)
+check("_parse_arp windows layout",
+      m._parse_arp("192.168.1.9   00-11-22-33-44-55   dynamic").get("192.168.1.9")
+      == "00:11:22:33:44:55")
+check("_parse_arp empty input", m._parse_arp("") == {})
+check("_ndp_by_mac prefers the global address",
+      m._ndp_by_mac([("fe80::1", "AA:BB:CC:DD:EE:FF"),
+                     ("2a02::5", "AA:BB:CC:DD:EE:FF")])["AA:BB:CC:DD:EE:FF"]
+      .startswith("2a02"))
+check("_ndp_by_mac drops blank MACs", m._ndp_by_mac([("fe80::1", "")]) == {})
 
 # Live, network-dependent checks are skipped in CI / on hosts with no LAN.
 # Pure-logic checks (above and below) and the loopback port scan still run.
@@ -202,6 +226,11 @@ if not SKIP_LIVE:
     # --- ARP table after the sweep (cache now warm) ---
     table = m.Scanner._arp_table()
     print(f"INFO  _arp_table() entries after scan: {len(table)}")
+    if sys.platform == "darwin":
+        direct = m._parse_arp(subprocess.run(["/usr/sbin/arp", "-an"],
+                                             capture_output=True, text=True).stdout)
+        print(f"INFO  direct arp -an entries: {len(direct)}"
+              f" | helper path used for: {sorted(m._HELPER_USED) or 'nothing'}")
     check("arp table parsed", len(table) > 0)
     check("arp table has no placeholder MACs",
           not any(m._is_placeholder_mac(mac) for mac in table.values()))

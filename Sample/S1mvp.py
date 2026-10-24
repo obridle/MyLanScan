@@ -43,10 +43,24 @@ import customtkinter as ctk
 # Knowledge tables
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "0.3.3"
+APP_VERSION = "0.3.4"
 
 # Changelog shown in Help → Release Notes. Newest first.
 RELEASES: list[dict[str, object]] = [
+    {
+        "version": "0.3.4",
+        "date": "2026-10-24",
+        "added": ["Help → Scan diagnostics: which tools the app can find, what "
+                  "the neighbour-table reads return, and what the last scan "
+                  "collected — made to be copied into a bug report"],
+        "fixed": ["MAC addresses and vendor names are back on macOS 27. It stops "
+                  "handing link-layer addresses to any process that isn't an "
+                  "Apple platform binary, and child processes inherit that, so "
+                  "`arp -an` run by the app returns nothing at all. The "
+                  "neighbour table is now read through a job handed to launchd, "
+                  "which still can — unprivileged, once per sweep, and only "
+                  "when the direct read is blocked"],
+    },
     {
         "version": "0.3.3",
         "date": "2026-10-24",
@@ -288,6 +302,122 @@ def _parse_ndp(text: str) -> list[tuple[str, str]]:
                 mac = ""
         rows.append((v6, mac))
     return rows
+
+
+def _parse_arp(text: str) -> dict[str, str]:
+    """ip -> MAC from `arp -an` output.
+
+    BSD/macOS:  ? (192.168.1.5) at aa:bb:cc:dd:ee:ff on en0 ifscope [ethernet]
+    Windows:    192.168.1.1   00-11-22-33-44-55   dynamic
+    macOS drops leading zeros in octets, so groups are 1-2 digits; entries still
+    resolving ('(incomplete)') simply don't match. Placeholder rows are dropped."""
+    out: dict[str, str] = {}
+    for m in re.finditer(r"\((\d{1,3}(?:\.\d{1,3}){3})\)\s+at\s+"
+                         r"([0-9a-fA-F]{1,2}(?::[0-9a-fA-F]{1,2}){5})", text or ""):
+        mac = _norm_mac(m.group(2))
+        if mac and not _is_placeholder_mac(mac):
+            out[m.group(1)] = mac
+    if not out:
+        for m in re.finditer(
+                r"(\d{1,3}(?:\.\d{1,3}){3})\s+([0-9a-fA-F]{2}(?:[-:][0-9a-fA-F]{2}){5})",
+                text or ""):
+            mac = _norm_mac(m.group(2))
+            if mac and not _is_placeholder_mac(mac):
+                out[m.group(1)] = mac
+    return out
+
+
+def _ndp_by_mac(rows: list[tuple[str, str]]) -> dict[str, str]:
+    """MAC -> IPv6, preferring a global address over the link-local one."""
+    out: dict[str, str] = {}
+    for v6, mac in rows:
+        if not mac or not v6:
+            continue
+        cur = out.get(mac)
+        if cur is None or (cur.startswith("fe80") and not v6.lower().startswith("fe80")):
+            out[mac] = v6
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Neighbour table through a launchd helper (macOS 27)
+#
+# macOS 27 stops handing link-layer addresses to any process that isn't an Apple
+# platform binary, and children inherit that: `arp -an` and `ndp -an` started by
+# MyLanScan come back empty (`arp`) or as 02:00:00:00:00:00 (`ndp`) — whatever
+# the app is signed with, and even when it is started from Terminal. A job handed
+# to launchd is spawned by launchd instead, so the same Apple tool runs
+# unrestricted and we read the file it writes. Unprivileged, macOS only; when the
+# direct read works (older macOS) this never runs.
+# ---------------------------------------------------------------------------
+
+_HELPER_LOCK = threading.Lock()
+_HELPER_CACHE: dict[str, tuple[float, dict]] = {}
+_HELPER_TTL = 2.5            # one launchd round-trip per sweep, not one per host
+_HELPER_USED: set[str] = set()   # which tables had to go through the helper
+
+
+def _helper_output(command: str) -> str:
+    """stdout of `command` (an Apple tool such as '/usr/sbin/arp -an') run via
+    launchd, or '' if that isn't possible. Never prompts, never elevates."""
+    if sys.platform != "darwin":
+        return ""
+    fd, path = tempfile.mkstemp(prefix="mylanscan_neigh_", suffix=".txt")
+    os.close(fd)
+    label = f"com.mylanscan.neigh.{os.getpid()}.{int(time.time() * 1000) % 1000000}"
+    try:
+        subprocess.run(["/bin/launchctl", "submit", "-l", label, "--", "/bin/sh",
+                        "-c", f"{command} > {shlex.quote(path)} 2>/dev/null"],
+                       capture_output=True, text=True, timeout=5)
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            try:
+                text = Path(path).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                text = ""
+            if text.strip():
+                return text
+            time.sleep(0.1)
+        return ""
+    except Exception:
+        return ""
+    finally:
+        try:
+            subprocess.run(["/bin/launchctl", "remove", label],
+                           capture_output=True, timeout=5)
+        except Exception:
+            pass
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def _helper_table(command: str, parse):
+    """Parsed helper output, cached for _HELPER_TTL seconds. The ARP join runs
+    once per host right after its ping, and none of those may start a job."""
+    with _HELPER_LOCK:                      # one helper run at a time
+        at, table = _HELPER_CACHE.get(command, (0.0, {}))
+        if table and time.time() - at < _HELPER_TTL:
+            return table
+        table = parse(_helper_output(command)) or {}
+        if table:
+            _HELPER_CACHE[command] = (time.time(), table)
+    return table
+
+
+def _helper_arp_table() -> dict[str, str]:
+    table = _helper_table("/usr/sbin/arp -an", _parse_arp)
+    if table:
+        _HELPER_USED.add("arp")
+    return table
+
+
+def _helper_ndp_table() -> dict[str, str]:
+    table = _helper_table("/usr/sbin/ndp -an", lambda t: _ndp_by_mac(_parse_ndp(t)))
+    if table:
+        _HELPER_USED.add("ndp")
+    return table
 
 
 def vendor_for(mac: str) -> str:
@@ -533,6 +663,9 @@ class Scanner(threading.Thread):
             self._scan_mdns()
             self._enrich_names()
             self._scan_ipv6()
+            if _HELPER_USED:
+                self.q.put(("status", "MAC/IPv6 read through a system helper — "
+                                      "macOS 27 doesn't give them to apps directly."))
         except Exception as e:  # never let the worker die silently
             self.q.put(("status", f"Scan failed: {e!r}"))
         finally:
@@ -617,9 +750,10 @@ class Scanner(threading.Thread):
             time.sleep(1.5)
             table = self._arp_table()
         if not table:
-            hint = (" — macOS withholds the neighbour table from this process, "
+            hint = (" — macOS doesn't hand the neighbour table to this process, "
                     "so MAC/vendor stay blank" if sys.platform == "darwin" else "")
-            self.q.put(("status", f"No ARP entries available{hint}."))
+            self.q.put(("status", f"No ARP entries available{hint} "
+                                  "(see Help → Scan diagnostics)."))
             return
         with self.lock:
             updated = []
@@ -693,9 +827,9 @@ class Scanner(threading.Thread):
     def _ndp_table() -> dict[str, str]:
         """MAC -> IPv6 (global preferred over link-local), from the OS neighbour
         table. NOTE: macOS needs `ndp -an` (plain `ndp -a` hangs resolving names);
-        see _parse_ndp for the two column layouts it emits. Returns {} when the
-        neighbour table isn't readable, in which case callers fall back to
-        resolving IPv6 by Bonjour hostname."""
+        see _parse_ndp for the two column layouts it emits. Falls back to the
+        launchd helper when the direct read comes back stripped, and returns {}
+        if neither works."""
         out: dict[str, str] = {}
         if sys.platform.startswith("linux"):
             try:
@@ -705,6 +839,7 @@ class Scanner(threading.Thread):
             except Exception:
                 return out
             # e.g. "fe80::abcd:1234 dev enp0s3 lladdr aa:bb:cc:dd:ee:ff STALE"
+            rows: list[tuple[str, str]] = []
             for line in text.splitlines():
                 f = line.split()
                 if len(f) < 2 or "lladdr" not in f or f[0] == "fe80::1%":
@@ -719,22 +854,16 @@ class Scanner(threading.Thread):
                         mac = _norm_mac(f[i + 1])
                 if not mac or _is_placeholder_mac(mac):
                     continue
-                cur = out.get(mac)
-                if cur is None or (cur.startswith("fe80") and not v6.lower().startswith("fe80")):
-                    out[mac] = v6
-            return out
+                rows.append((v6, mac))
+            return _ndp_by_mac(rows)
         try:
             text = subprocess.run(["ndp", "-an"], capture_output=True,
                                   text=True, timeout=5).stdout
         except Exception:
-            return out
-        for v6, mac in _parse_ndp(text):
-            if not mac or not v6:
-                continue
-            cur = out.get(mac)
-            # prefer global (non-fe80) addresses over link-local
-            if cur is None or (cur.startswith("fe80") and not v6.lower().startswith("fe80")):
-                out[mac] = v6
+            text = ""
+        out = _ndp_by_mac(_parse_ndp(text))
+        if not out and sys.platform == "darwin":
+            out = _helper_ndp_table()
         return out
 
     def _scan_ipv6(self):
@@ -905,33 +1034,26 @@ class Scanner(threading.Thread):
         # macOS strips leading zeros: 'e0:98:6:da:33:3f' — accept 1-2 digit groups.
         m = re.search(r"at\s+([0-9a-fA-F]{1,2}(?::[0-9a-fA-F]{1,2}){5})", out)
         mac = _norm_mac(m.group(1)) if m else ""
-        return "" if _is_placeholder_mac(mac) else mac
+        if mac and not _is_placeholder_mac(mac):
+            return mac
+        # Blocked direct read on macOS 27 — the helper has the whole table.
+        if sys.platform == "darwin":
+            return _helper_arp_table().get(ip, "")
+        return ""
 
     @staticmethod
     def _arp_table() -> dict[str, str]:
         """ip -> MAC, from the OS ARP/neighbour cache."""
-        out: dict[str, str] = {}
         try:
             # -n: never resolve names. `arp -a` does reverse DNS per entry, which
             # is slow (and can exceed the timeout) right after a sweep.
             text = subprocess.run(["arp", "-an"], capture_output=True,
                                   text=True, timeout=10).stdout
-            # BSD/macOS:  ? (192.168.1.5) at aa:bb:cc:dd:ee:ff on en0 ifscope [ethernet]
-            # NOTE: macOS drops leading zeros in octets, so groups are 1-2 digits.
-            for m in re.finditer(r"\((\d{1,3}(?:\.\d{1,3}){3})\)\s+at\s+"
-                                 r"([0-9a-fA-F]{1,2}(?::[0-9a-fA-F]{1,2}){5})", text):
-                mac = _norm_mac(m.group(2))
-                if mac and not _is_placeholder_mac(mac):
-                    out[m.group(1)] = mac
-            # Windows:    192.168.1.1   00-11-22-33-44-55   dynamic
-            if not out:
-                for m in re.finditer(
-                        r"(\d{1,3}(?:\.\d{1,3}){3})\s+([0-9a-fA-F]{2}(?:[-:][0-9a-fA-F]{2}){5})", text):
-                    mac = _norm_mac(m.group(2))
-                    if mac and not _is_placeholder_mac(mac):
-                        out[m.group(1)] = mac
         except Exception:
-            pass
+            text = ""
+        out = _parse_arp(text)
+        if not out and sys.platform == "darwin":
+            out = _helper_arp_table()
         if not out and sys.platform.startswith("linux"):
             try:
                 with open("/proc/net/arp") as f:
@@ -1215,6 +1337,64 @@ class PortScanDialog(ctk.CTkToplevel):
         if self.scanner:
             self.scanner.stop()
         super().destroy()
+
+
+def diagnostics_report(devices=None) -> str:
+    """Plain text describing what this process can actually see on the network:
+    which tools it finds, what the neighbour-table reads return both directly and
+    through the launchd helper, and what the last scan collected. Help → Scan
+    diagnostics shows it so a bug report can carry it."""
+    def raw(args) -> str:
+        try:
+            return subprocess.run(args, capture_output=True, text=True,
+                                  timeout=10).stdout
+        except Exception as e:
+            return f"<{type(e).__name__}: {e}>"
+
+    lines = [
+        f"MyLanScan {APP_VERSION}",
+        f"macOS    : {platform.mac_ver()[0] or platform.platform()} ({platform.machine()})"
+        if sys.platform == "darwin" else f"system   : {platform.platform()}",
+        f"python   : {sys.version.split()[0]}  frozen={getattr(sys, 'frozen', False)}"
+        f"  euid={os.geteuid()}",
+        f"PATH     : {os.environ.get('PATH', '')}",
+    ]
+    for tool in ("arp", "ndp", "ping", "route", "dns-sd", "launchctl", "nmap"):
+        lines.append(f"tool     : {tool} -> {shutil.which(tool) or 'not found'}")
+
+    if sys.platform == "darwin":
+        direct = _parse_arp(raw(["/usr/sbin/arp", "-an"]))
+        rows = _parse_ndp(raw(["/usr/sbin/ndp", "-an"]))
+        via = _helper_arp_table()
+        lines += [
+            "",
+            f"direct arp -an : {len(direct)} entries with a MAC",
+            f"helper arp -an : {len(via)} entries with a MAC"
+            f"{'  (used)' if _HELPER_USED else ''}",
+            f"direct ndp -an : {len([1 for v, m in rows if m])} rows with a MAC,"
+            f" {len(rows)} rows total",
+            f"helper ndp -an : {len(_helper_ndp_table())} MAC -> IPv6 pairs",
+        ]
+        if not direct and via:
+            lines.append("NOTE     : macOS 27 won't give link-layer addresses to this"
+                         " process; the helper path is covering it.")
+        elif not direct and not via:
+            lines.append("NOTE     : neither path can read the ARP table here.")
+    elif sys.platform.startswith("linux"):
+        lines.append("")
+        lines.append(f"ip -6 neigh    : {len(_ndp_table_rows_linux(raw))} rows")
+
+    if devices:
+        with_mac = sum(1 for d in devices.values() if d.mac)
+        with_v6 = sum(1 for d in devices.values() if d.ipv6)
+        lines += ["", f"last scan      : {len(devices)} device(s) —"
+                      f" with MAC {with_mac}, with IPv6 {with_v6}"]
+    return "\n".join(lines)
+
+
+def _ndp_table_rows_linux(raw) -> list:
+    text = raw(["ip", "-6", "neigh", "show"])
+    return [l for l in text.splitlines() if "lladdr" in l]
 
 
 # ---------------------------------------------------------------------------
@@ -1595,6 +1775,40 @@ class ReleaseNotesDialog(ctk.CTkToplevel):
         ctk.CTkButton(self, text="Close", width=90,
                       command=self.destroy).pack(pady=(0, 12))
 
+
+class DiagnosticsDialog(ctk.CTkToplevel):
+    """What this process can actually see on the network — which tools it finds
+    and what the neighbour-table reads return. Handy when a column stays empty:
+    the text can be copied straight into a bug report."""
+
+    def __init__(self, master, devices=None):
+        super().__init__(master)
+        if getattr(master, "_menubar", None):
+            self.config(menu=master._menubar)
+        self.title(f"MyLanScan v{APP_VERSION} — Scan diagnostics")
+        self.geometry("640x520")
+        ctk.CTkLabel(self, anchor="w", justify="left",
+                     text="If MAC or IPv6 stay empty, copy this into a bug report."
+                     ).pack(fill="x", padx=12, pady=(10, 4))
+        ctk.CTkTextbox(self, wrap="none").pack(fill="both", expand=True,
+                                               padx=12, pady=(0, 6))
+        self.textbox = self.winfo_children()[-1]
+        self.textbox.insert("1.0", diagnostics_report(devices))
+        self.status_var = ctk.StringVar(value="")
+        bottom = ctk.CTkFrame(self)
+        bottom.pack(fill="x", padx=12, pady=(0, 12))
+        ctk.CTkButton(bottom, text="Copy", width=90,
+                      command=self.copy).pack(side="left")
+        ctk.CTkLabel(bottom, text="", textvariable=self.status_var).pack(
+            side="left", padx=8)
+        ctk.CTkButton(bottom, text="Close", width=90,
+                      command=self.destroy).pack(side="right")
+
+    def copy(self):
+        self.clipboard_clear()
+        self.clipboard_append(self.textbox.get("1.0", "end").strip())
+        self.status_var.set("Copied to clipboard")
+
 # ---------------------------------------------------------------------------
 # Main window
 # ---------------------------------------------------------------------------
@@ -1651,6 +1865,8 @@ class App(ctk.CTk):
                               command=lambda: HelpDialog(self))
         help_menu.add_command(label="Release Notes",
                               command=lambda: ReleaseNotesDialog(self))
+        help_menu.add_command(label="Scan diagnostics",
+                              command=lambda: DiagnosticsDialog(self, self.devices))
         m.add_cascade(label="Help", menu=help_menu)
 
         self.config(menu=m)

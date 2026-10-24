@@ -51,6 +51,17 @@ Silicon only; the Linux binaries need Debian 12+ / Ubuntu 22.04+ or newer.
 - **Rescan in place**: re-scans update existing rows; devices absent from the latest scan are pruned
 - **CSV export**, sortable columns, drag-to-resize columns, horizontal scrolling
 - Unprivileged: no sudo needed for everyday use (ICMP/ARP/TCP-connect only)
+- **Scan diagnostics** (Help menu): what the app can see — tools found, neighbour-table
+  reads, last scan totals — for pasting into a bug report
+
+### MAC addresses on macOS 27
+
+macOS 27 no longer gives link-layer addresses to any process that isn't an Apple platform
+binary, and child processes inherit that: `arp -an` started by the app comes back empty, so
+a scanner running on Python sees no MACs and therefore no vendor names. MyLanScan reads the
+neighbour table through a job handed to launchd instead, which still can (unprivileged, and
+only when the direct read is blocked). If MAC/vendor stay empty regardless, open
+*Help → Scan diagnostics* and include the text in your report.
 
 ## Requirements (running from source)
 
