@@ -59,6 +59,12 @@ PLIST="dist/$APP_NAME.app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $APP_VERSION" "$PLIST"
 /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $APP_VERSION" "$PLIST" 2>/dev/null \
     || /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $APP_VERSION" "$PLIST"
+# macOS 15+ gates local-network access (and Bonjour browsing) behind this
+# purpose string; without it the system can deny LAN traffic outright.
+/usr/libexec/PlistBuddy -c "Add :NSLocalNetworkUsageDescription string \
+'MyLanScan scans your local network to list the devices connected to it.'" "$PLIST" 2>/dev/null \
+    || /usr/libexec/PlistBuddy -c "Set :NSLocalNetworkUsageDescription \
+'MyLanScan scans your local network to list the devices connected to it.'" "$PLIST"
 
 if [ "$SIGN_IDENTITY" = "-" ]; then
     echo "== ad-hoc signing (fixes Gatekeeper 'app is damaged') =="

@@ -29,7 +29,8 @@ check("vendor_for Apple", m.vendor_for("F0:18:98:11:22:33") == "Apple")
 check("vendor_for randomized MAC", m.vendor_for("2E:57:60:16:D7:8D") == "Private MAC (randomized)")
 check("OUI table loaded", len(m.OUI_VENDORS) > 30000, f"{len(m.OUI_VENDORS)} entries")
 known_oui = next(iter(m.OUI_VENDORS))
-check("vendor_for known prefix", m.vendor_for(known_oui + ":00:00") == m.OUI_VENDORS[known_oui])
+check("vendor_for known prefix",
+      m.vendor_for(known_oui + ":11:22:33") == m.OUI_VENDORS[known_oui])
 check("kind_for mapped", m.kind_for("B8:27:EB:00:00:01") == "SBC / maker")
 check("ip_sort_key numeric", m.ip_sort_key("192.168.1.2") < m.ip_sort_key("192.168.1.10"))
 
@@ -38,6 +39,44 @@ check("kind_from_service AirPlay", m.kind_from_service("_airplay._tcp.local.") =
 check("kind_from_service companion", m.kind_from_service("_companion-link._tcp.local.") == "iPhone/iPad")
 check("kind_from_service printer", m.kind_from_service("_ipp._tcp.local.") == "Printer")
 check("kind_from_service fallback", m.kind_from_service("_odd._tcp.local.") == "mDNS device")
+
+# --- the OS can hand back a not-a-real-MAC stand-in (restricted processes see
+# '02:00:00:00:00:00' from ifconfig/arp/ndp); it must never look like a device ---
+check("_is_placeholder_mac zeros", m._is_placeholder_mac("02:00:00:00:00:00"))
+check("_is_placeholder_mac ndp form", m._is_placeholder_mac("2:0:0:0:0:0"))
+check("_is_placeholder_mac empty", m._is_placeholder_mac(""))
+check("_is_placeholder_mac real", not m._is_placeholder_mac("E0:98:06:DA:33:3F"))
+check("vendor_for placeholder", m.vendor_for("02:00:00:00:00:00") == "")
+
+# --- MAC from Bonjour: AirPlay/RAOP publish it in TXT `deviceid`, RAOP also
+# encodes it as a prefix on the service instance name ---
+check("_mac_from_mdns deviceid",
+      m._mac_from_mdns({"deviceid": "90:02:18:7E:7E:89"}) == "90:02:18:7E:7E:89")
+check("_mac_from_mdns raw bytes",
+      m._mac_from_mdns({"deviceid": b"90:02:18:2E:18:52"}) == "90:02:18:2E:18:52")
+check("_mac_from_mdns raop instance name",
+      m._mac_from_mdns({}, "9002182E1852@Sky Q Mini0369") == "90:02:18:2E:18:52")
+check("_mac_from_mdns ignores placeholder",
+      m._mac_from_mdns({"deviceid": "02:00:00:00:00:00"}) == "")
+check("_mac_from_mdns none", m._mac_from_mdns({"model": "MacBookPro18,3"}) == "")
+
+# --- `ndp -an`: recent macOS drops the '%iface' suffix on global neighbours and
+# puts the interface in its own column; the old parser skipped those entirely ---
+NDP_SAMPLE = """\
+Neighbor                                Linklayer Address  Netif Expire    St Flgs Prbs
+2a02:c7c:6036:5a00:96c:be58:9370:d016   4a:f2:9c:d8:9c:5a    en0 permanent R
+fe80::222b:20ff:fe88:c83%en0            20:2b:20:88:c:83    en0 23h47m56s S
+fe80::8837:95aa:2539:811%utun4          (incomplete)       utun4 permanent R
+2a02:c7c:6036:5a00:e7:2de1:52e0:bf55    2:0:0:0:0:0          en0 22h  S
+"""
+NDP_ROWS = dict(m._parse_ndp(NDP_SAMPLE))
+check("_parse_ndp keeps global row without %iface",
+      NDP_ROWS.get("2a02:0c7c:6036:5a00:096c:be58:9370:d016") == "4A:F2:9C:D8:9C:5A")
+check("_parse_ndp keeps link-local row with %iface",
+      "20:2B:20:88:0C:83" in NDP_ROWS.values())
+check("_parse_ndp blanks incomplete and placeholder MACs",
+      list(NDP_ROWS.values()).count("") == 2)
+check("_parse_ndp skips the header row", len(NDP_ROWS) == 4)
 
 # Live, network-dependent checks are skipped in CI / on hosts with no LAN.
 # Pure-logic checks (above and below) and the loopback port scan still run.
@@ -49,9 +88,15 @@ if not SKIP_LIVE:
     mdns = m.mdns_discover(browse_secs=2.0)
     check("mdns_discover runs unprivileged", isinstance(mdns, dict))
     if mdns:
-        ip, (host, svc) = next(iter(mdns.items()))
-        check("mdns entry has host+service", bool(host) and "_" in svc,
-              f"{ip} {host} {svc}")
+        info = next(iter(mdns.values()))
+        check("mdns entry has host+service", bool(info.host) and "_" in info.service,
+              f"{info.ip} {info.host} {info.service}")
+        tx = {i.ip: i.mac for i in mdns.values() if i.mac}
+        if tx:
+            ip0 = next(iter(tx))
+            check("mdns TXT deviceid MACs parsed", True, f"{len(tx)}: {ip0} -> {tx[ip0]}")
+        else:
+            print("SKIP  mdns TXT MACs (no AirPlay/RAOP advertiser on this LAN)")
     else:
         print("SKIP  mdns entry (quiet LAN)")
 
@@ -158,8 +203,12 @@ if not SKIP_LIVE:
     table = m.Scanner._arp_table()
     print(f"INFO  _arp_table() entries after scan: {len(table)}")
     check("arp table parsed", len(table) > 0)
+    check("arp table has no placeholder MACs",
+          not any(m._is_placeholder_mac(mac) for mac in table.values()))
     joined = sum(1 for d in devices.values() if d.mac)
     check("MACs joined to devices", joined > 0, f"{joined}/{len(devices)}")
+    check("no placeholder MAC shown as a device MAC",
+          not any(d.mac and m._is_placeholder_mac(d.mac) for d in devices.values()))
 
     me = next((d for d in devices.values() if d.ip == local_ip), None)
     if me is None:

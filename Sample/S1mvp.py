@@ -43,10 +43,27 @@ import customtkinter as ctk
 # Knowledge tables
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "0.3.2"
+APP_VERSION = "0.3.3"
 
 # Changelog shown in Help → Release Notes. Newest first.
 RELEASES: list[dict[str, object]] = [
+    {
+        "version": "0.3.3",
+        "date": "2026-10-24",
+        "added": ["MAC resolution from Bonjour TXT records (AirPlay/RAOP "
+                  "`deviceid`), and IPv6 resolution by Bonjour hostname — both "
+                  "for hosts the OS neighbour table doesn't cover",
+                  "A status message when the OS withholds the ARP/neighbour "
+                  "table from the app, instead of silently blank MAC/vendor"],
+        "fixed": ["IPv6 was missing for most hosts on recent macOS: `ndp -an` no "
+                  "longer suffixes global entries with the interface name, and "
+                  "the parser skipped every row without one",
+                  "The OS placeholder 02:00:00:00:00:00 is no longer shown as a "
+                  "host's MAC (it also produced a bogus 'Private MAC "
+                  "(randomized)' vendor)",
+                  "ARP table now read with `arp -an` — no per-entry reverse DNS, "
+                  "so the join no longer stalls right after a sweep"],
+    },
     {
         "version": "0.3.2",
         "date": "2026-10-23",
@@ -208,8 +225,73 @@ def _norm_mac(raw: str) -> str:
     return ""
 
 
-def vendor_for(mac: str) -> str:
+def _is_placeholder_mac(mac: str) -> bool:
+    """True when the OS handed us a not-a-real-address stand-in rather than a
+    hardware address: '02:00:00:00:00:00' (what a restricted process sees from
+    `ifconfig`/`arp`/`ndp`) or an all-zero value. Such a MAC has no vendor and
+    must never reach the table as if it were real."""
     if not mac:
+        return True
+    norm = _norm_mac(mac)          # also accepts '2:0:0:0:0:0' and 'aa-bb-..'
+    if not norm:
+        return True
+    return norm == "02:00:00:00:00:00" or not norm.replace(":", "").strip("0")
+
+
+def _mac_from_mdns(props: dict, service_name: str = "") -> str:
+    """Hardware MAC advertised in a Bonjour TXT record, if any.
+
+    AirPlay (_airplay) and RAOP (_raop) devices publish it as `deviceid`, and
+    RAOP instance names start with 'AABBCCDDEEFF@'. Independent of the ARP
+    cache, so it also covers hosts the neighbour table won't tell us about."""
+    for key in ("deviceid", "mac", "macaddress", "hwaddr", "device_id"):
+        raw = props.get(key)
+        if raw is None:
+            continue
+        if isinstance(raw, bytes):
+            raw = raw.decode("ascii", "ignore")
+        mac = _norm_mac(str(raw))
+        if mac and not _is_placeholder_mac(mac):
+            return mac
+    m = re.match(r"^([0-9A-Fa-f]{12})@", service_name or "")
+    if m:
+        h = m.group(1)
+        mac = _norm_mac(":".join(h[i:i + 2] for i in range(0, 12, 2)))
+        if not _is_placeholder_mac(mac):
+            return mac
+    return ""
+
+
+def _parse_ndp(text: str) -> list[tuple[str, str]]:
+    """Parse `ndp -an` into [(ipv6, mac), ...].
+
+    Two column layouts exist: link-local neighbours read
+    'fe80::222b:20ff:fe88:c83%en0  20:2b:20:88:c:83  en0  ...', while recent
+    macOS lists a global neighbour with no '%iface' suffix and the interface in
+    its own column ('2a02:...:a7  38:f7:cd:d3:cc:7f  en0  17h ...'). Both are
+    accepted here; the old '%'-only check silently dropped every global entry.
+    An incomplete or placeholder ('2:0:0:0:0:0') address comes back as ''."""
+    rows: list[tuple[str, str]] = []
+    for line in (text or "").splitlines():
+        f = line.split()
+        if len(f) < 2 or f[0] in ("Neighbor", "Neighbour"):
+            continue
+        addr = f[0].split("%")[0]
+        try:
+            v6 = ipaddress.IPv6Address(addr).exploded
+        except ValueError:
+            continue
+        mac = ""
+        if f[1] != "(incomplete)":
+            mac = _norm_mac(f[1])
+            if _is_placeholder_mac(mac):
+                mac = ""
+        rows.append((v6, mac))
+    return rows
+
+
+def vendor_for(mac: str) -> str:
+    if not mac or _is_placeholder_mac(mac):
         return ""
     # Locally-administered bit (second-least-significant bit of octet 1): set
     # on randomized "private Wi-Fi" MACs (iOS/Android) whose OUI is fake and
@@ -303,15 +385,28 @@ def kind_from_service(service: str) -> str:
     return "mDNS device"
 
 
-def mdns_discover(browse_secs: float = 3.5) -> dict[str, tuple[str, str]]:
-    """ip -> (hostname, service_type), via zeroconf browse of common types.
-    Unprivileged; returns {} if zeroconf isn't installed.
-    First-seen service type wins so Type stays stable per host."""
+@dataclass
+class MdnsInfo:
+    """What one Bonjour announcement tells us about a host."""
+    ip: str = ""
+    host: str = ""
+    service: str = ""
+    ipv6: str = ""
+    mac: str = ""
+
+
+def mdns_discover(browse_secs: float = 3.5) -> dict[str, MdnsInfo]:
+    """ip -> MdnsInfo, via zeroconf browse of common types.
+
+    Unprivileged; returns {} if zeroconf isn't installed. First-seen service
+    type wins so Type stays stable per host. A second MAC source besides the
+    ARP cache: AirPlay/RAOP devices publish their hardware address in the TXT
+    record, which also covers hosts whose MAC arp/ndp won't reveal."""
     try:
         from zeroconf import Zeroconf, ServiceBrowser
     except ImportError:
         return {}
-    found: dict[str, tuple[str, str]] = {}
+    found: dict[str, MdnsInfo] = {}
 
     class L:
         def add_service(self, zc, type_, name):
@@ -319,14 +414,45 @@ def mdns_discover(browse_secs: float = 3.5) -> dict[str, tuple[str, str]]:
                 info = zc.get_service_info(type_, name, timeout=600)
             except Exception:
                 return
-            if info and info.addresses:
-                ip = socket.inet_ntoa(info.addresses[0])
-                if ip in found:
-                    return
-                host = (info.server or name.split(".")[0]).strip(".")
-                if host.endswith(".local"):
-                    host = host[:-len(".local")]
-                found[ip] = (host, type_)
+            if not info:
+                return
+            ip4 = ip6 = ""
+            for packed in info.addresses or []:
+                try:
+                    if len(packed) == 4:
+                        a = socket.inet_ntop(socket.AF_INET, packed)
+                        if not a.startswith("127."):
+                            ip4 = ip4 or a
+                    elif len(packed) == 16:
+                        a = socket.inet_ntop(socket.AF_INET6, packed)
+                        low = a.lower()
+                        if low.startswith("::ffff:") and "." in a:
+                            v4 = a.rsplit(":", 1)[-1]
+                            if not v4.startswith("127."):
+                                ip4 = ip4 or v4
+                        elif low in ("::1", "::"):
+                            continue
+                        elif low.startswith("fe80"):
+                            ip6 = ip6 or a
+                        else:
+                            ip6 = a          # prefer a global/ULA address
+                except (OSError, ValueError):
+                    pass
+            ip = ip4 or ip6
+            if not ip or ip in found:
+                return
+            host = (info.server or name.split(".")[0]).strip(".")
+            if host.endswith(".local"):
+                host = host[:-len(".local")]
+            props = {}
+            for k, v in (info.properties or {}).items():
+                if isinstance(k, bytes):
+                    k = k.decode("ascii", "ignore")
+                if isinstance(v, bytes):
+                    v = v.decode("ascii", "ignore")
+                props[str(k)] = v
+            found[ip] = MdnsInfo(ip=ip, host=host, service=type_,
+                                 ipv6=ip6, mac=_mac_from_mdns(props, name))
 
         def update_service(self, *a):
             pass
@@ -387,7 +513,7 @@ class Scanner(threading.Thread):
         self.stop_event = threading.Event()
         self.lock = threading.Lock()
         self.devices: dict[str, Device] = {}
-        self.mdns: dict[str, tuple[str, str]] = {}
+        self.mdns_info: dict[str, MdnsInfo] = {}
 
     def stop(self):
         self.stop_event.set()
@@ -485,13 +611,15 @@ class Scanner(threading.Thread):
 
         # One-shot MAC join from the OS ARP cache (all pingers populated it).
         # NOTE: right after a sweep the kernel table is still churning and
-        # `arp -a` can exceed its subprocess timeout — retry once after settling.
+        # `arp -an` can exceed its subprocess timeout — retry once after settling.
         table = self._arp_table()
         if not table:
             time.sleep(1.5)
             table = self._arp_table()
         if not table:
-            self.q.put(("status", "ARP cache read failed — MAC/vendor columns unavailable."))
+            hint = (" — macOS withholds the neighbour table from this process, "
+                    "so MAC/vendor stay blank" if sys.platform == "darwin" else "")
+            self.q.put(("status", f"No ARP entries available{hint}."))
             return
         with self.lock:
             updated = []
@@ -511,7 +639,7 @@ class Scanner(threading.Thread):
         if self.stop_event.is_set():
             return
         self.q.put(("status", "Resolving remaining DNS names …"))
-        mdns = self.mdns
+        mdns = self.mdns_info
 
         def rdns(ip: str) -> str:
             try:
@@ -531,7 +659,8 @@ class Scanner(threading.Thread):
         with self.lock:
             updated = []
             for d in self.devices.values():
-                name = (mdns.get(d.ip, ("", ""))[0] or ptr.get(d.ip) or "")
+                info = mdns.get(d.ip)
+                name = (info.host if info else "") or ptr.get(d.ip) or ""
                 if name.lower() == "unknown":   # macOS resolver junk for unresolvable IPs
                     name = ""
                 if name and not d.name:
@@ -563,7 +692,10 @@ class Scanner(threading.Thread):
     @staticmethod
     def _ndp_table() -> dict[str, str]:
         """MAC -> IPv6 (global preferred over link-local), from the OS neighbour
-        table. NOTE: macOS needs `ndp -an` (plain `ndp -a` hangs resolving names)."""
+        table. NOTE: macOS needs `ndp -an` (plain `ndp -a` hangs resolving names);
+        see _parse_ndp for the two column layouts it emits. Returns {} when the
+        neighbour table isn't readable, in which case callers fall back to
+        resolving IPv6 by Bonjour hostname."""
         out: dict[str, str] = {}
         if sys.platform.startswith("linux"):
             try:
@@ -578,14 +710,14 @@ class Scanner(threading.Thread):
                 if len(f) < 2 or "lladdr" not in f or f[0] == "fe80::1%":
                     continue
                 try:
-                    v6 = ipaddress.IPv6Address(f[0]).exploded
+                    v6 = ipaddress.IPv6Address(f[0].split("%")[0]).exploded
                 except ValueError:
                     continue
                 mac = ""
                 for i, tok in enumerate(f):
                     if tok == "lladdr" and i + 1 < len(f):
                         mac = _norm_mac(f[i + 1])
-                if not mac:
+                if not mac or _is_placeholder_mac(mac):
                     continue
                 cur = out.get(mac)
                 if cur is None or (cur.startswith("fe80") and not v6.lower().startswith("fe80")):
@@ -596,16 +728,7 @@ class Scanner(threading.Thread):
                                   text=True, timeout=5).stdout
         except Exception:
             return out
-        for line in text.splitlines():
-            f = line.split()
-            if len(f) < 2 or "%" not in f[0] or f[1] == "(incomplete)":
-                continue
-            mac = _norm_mac(f[1])
-            try:
-                # exploded = full form, zeros written out (no '::') — easier to read
-                v6 = ipaddress.IPv6Address(f[0].split("%")[0]).exploded
-            except ValueError:
-                continue
+        for v6, mac in _parse_ndp(text):
             if not mac or not v6:
                 continue
             cur = out.get(mac)
@@ -615,36 +738,69 @@ class Scanner(threading.Thread):
         return out
 
     def _scan_ipv6(self):
-        """Multicast-ping ff02::1 to make quiet v6 hosts populate NDP, then join
-        v6 addresses onto discovered devices by MAC."""
+        """Attach an IPv6 address to every device that doesn't have one yet.
+
+        Multicast-ping ff02::1 first so quiet v6 hosts populate the neighbour
+        table, then match it to devices by MAC. MACs aren't always available
+        (see _arp_table), so hosts we know a Bonjour name for are resolved
+        through the OS resolver as well."""
         if self.stop_event.is_set():
             return
         iface = self._default_iface()
-        if not iface:
-            return
-        self.q.put(("status", f"Probing IPv6 neighbors on {iface} …"))
-        if sys.platform.startswith("linux"):
-            cmd = ["ping", "-6", "-I", iface, "-c", "3", "-i", "0.3", "ff02::1"]
-        else:
-            cmd = ["ping6", "-n", "-c", "3", "-i", "0.3", f"ff02::1%{iface}"]
-        proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-        try:
-            out, _ = proc.communicate(timeout=4.0)
-        except subprocess.TimeoutExpired:
-            proc.kill()          # macOS multicast ping6 never exits on its own
-            out, _ = proc.communicate()
+        if iface:
+            self.q.put(("status", f"Probing IPv6 neighbors on {iface} …"))
+            if sys.platform.startswith("linux"):
+                cmd = ["ping", "-6", "-I", iface, "-c", "3", "-i", "0.3", "ff02::1"]
+            else:
+                cmd = ["ping6", "-n", "-c", "3", "-i", "0.3", f"ff02::1%{iface}"]
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            try:
+                out, _ = proc.communicate(timeout=4.0)
+            except subprocess.TimeoutExpired:
+                proc.kill()          # macOS multicast ping6 never exits on its own
+                out, _ = proc.communicate()
         ndp = self._ndp_table()
 
         with self.lock:
+            targets = [(d.ip, d.mac, d.name) for d in self.devices.values()
+                       if not d.ipv6]
+        found: dict[str, str] = {}
+        named: list[tuple[str, str]] = []
+        for ip, mac, name in targets:
+            v6 = ndp.get(mac, "") if mac else ""
+            if v6:
+                found[ip] = v6
+            elif name:
+                named.append((ip, name))
+
+        # The neighbour table only helps when we know the MAC. For hosts we have
+        # a Bonjour name for, ask the OS resolver for the AAAA record instead.
+        # One short-lived subprocess per host, so keep it bounded and off the
+        # lock — device updates must keep flowing while this runs.
+        if named and sys.platform == "darwin":
+            batch = named[:48]
+            self.q.put(("status", f"Resolving IPv6 via Bonjour for {len(batch)} host(s) …"))
+            with ThreadPoolExecutor(max_workers=8, thread_name_prefix="v6") as pool:
+                futs = {pool.submit(self._dns_sd_ipv6, name): ip
+                        for ip, name in batch}
+                for f in as_completed(futs):
+                    v6 = f.result()
+                    if v6:
+                        found[futs[f]] = v6
+
+        if not found:
+            return
+        with self.lock:
             updated = []
             for d in self.devices.values():
-                v6 = ndp.get(d.mac, "")
+                v6 = found.get(d.ip, "")
                 if v6 and not d.ipv6:
                     d.ipv6 = v6
                     updated.append(replace(d))
         for d in updated:
             self.q.put(("device", d))
+
     def _run_pool(self, hosts, probe):
         with ThreadPoolExecutor(max_workers=self.workers, thread_name_prefix="probe") as pool:
             futs = [pool.submit(probe, ip) for ip in hosts if not self.stop_event.is_set()]
@@ -681,6 +837,43 @@ class Scanner(threading.Thread):
         self.q.put(("device", snapshot))
 
     @staticmethod
+    def _dns_sd_ipv6(host: str) -> str:
+        """IPv6 address for a Bonjour hostname, via macOS's own resolver
+        (`dns-sd -G v4v6`). Gets a real address even when the neighbour table
+        isn't giving us one, e.g. for a host we only know by name."""
+        if not host or sys.platform != "darwin":
+            return ""
+        name = host if host.endswith(".local") else host + ".local"
+        try:
+            proc = subprocess.Popen(["/usr/bin/dns-sd", "-G", "v4v6", name],
+                                    stdout=subprocess.PIPE,
+                                    stderr=subprocess.DEVNULL, text=True)
+            try:
+                out, _ = proc.communicate(timeout=2.5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                out, _ = proc.communicate()
+        except Exception:
+            return ""
+        best, best_rank = "", 0
+        for line in (out or "").splitlines():
+            if "Add" not in line or "A/R" in line:
+                continue
+            for tok in re.findall(r"[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){5,7}", line):
+                try:
+                    v6 = ipaddress.IPv6Address(tok)
+                except ValueError:
+                    continue
+                if v6.is_loopback or v6.is_unspecified:
+                    continue
+                # Prefer a globally routable address; a link-local one needs a
+                # scope id to be usable, so fall back to it last.
+                rank = 1 if v6.is_link_local else (2 if v6.is_private else 3)
+                if rank > best_rank:
+                    best, best_rank = v6.exploded, rank
+        return best
+
+    @staticmethod
     def _arp_for(ip: str) -> str:
         """MAC for a single host, straight from the ARP/neighbour cache ('' if absent)."""
         if sys.platform.startswith("linux"):
@@ -692,7 +885,8 @@ class Scanner(threading.Thread):
                 return ""
             m = re.search(r"lladdr\s+([0-9a-fA-F]{1,2}(?::[0-9a-fA-F]{1,2}){5})", out)
             if m:
-                return _norm_mac(m.group(1))
+                mac = _norm_mac(m.group(1))
+                return "" if _is_placeholder_mac(mac) else mac
             # fallback: net-tools `arp -n`
             try:
                 out = subprocess.run(["arp", "-n", ip], capture_output=True,
@@ -701,7 +895,8 @@ class Scanner(threading.Thread):
                 return ""
             # Linux arp(8): 192.168.1.5   ether   aa:bb:cc:dd:ee:ff  C  enp0s3
             m = re.search(r"ether\s+([0-9a-fA-F]{1,2}(?::[0-9a-fA-F]{1,2}){5})", out)
-            return _norm_mac(m.group(1)) if m else ""
+            mac = _norm_mac(m.group(1)) if m else ""
+            return "" if _is_placeholder_mac(mac) else mac
         try:
             out = subprocess.run(["arp", "-n", ip], capture_output=True,
                                  text=True, timeout=3).stdout
@@ -709,25 +904,32 @@ class Scanner(threading.Thread):
             return ""
         # macOS strips leading zeros: 'e0:98:6:da:33:3f' — accept 1-2 digit groups.
         m = re.search(r"at\s+([0-9a-fA-F]{1,2}(?::[0-9a-fA-F]{1,2}){5})", out)
-        return _norm_mac(m.group(1)) if m else ""
+        mac = _norm_mac(m.group(1)) if m else ""
+        return "" if _is_placeholder_mac(mac) else mac
 
     @staticmethod
     def _arp_table() -> dict[str, str]:
-        """ip -> MAC, from the OS ARP cache."""
+        """ip -> MAC, from the OS ARP/neighbour cache."""
         out: dict[str, str] = {}
         try:
-            text = subprocess.run(["arp", "-a"], capture_output=True,
+            # -n: never resolve names. `arp -a` does reverse DNS per entry, which
+            # is slow (and can exceed the timeout) right after a sweep.
+            text = subprocess.run(["arp", "-an"], capture_output=True,
                                   text=True, timeout=10).stdout
-            # BSD/macOS:  (192.168.1.5) at aa:bb:cc:dd:ee:ff [ether] on en0
+            # BSD/macOS:  ? (192.168.1.5) at aa:bb:cc:dd:ee:ff on en0 ifscope [ethernet]
             # NOTE: macOS drops leading zeros in octets, so groups are 1-2 digits.
             for m in re.finditer(r"\((\d{1,3}(?:\.\d{1,3}){3})\)\s+at\s+"
                                  r"([0-9a-fA-F]{1,2}(?::[0-9a-fA-F]{1,2}){5})", text):
-                out[m.group(1)] = _norm_mac(m.group(2))
+                mac = _norm_mac(m.group(2))
+                if mac and not _is_placeholder_mac(mac):
+                    out[m.group(1)] = mac
             # Windows:    192.168.1.1   00-11-22-33-44-55   dynamic
             if not out:
                 for m in re.finditer(
                         r"(\d{1,3}(?:\.\d{1,3}){3})\s+([0-9a-fA-F]{2}(?:[-:][0-9a-fA-F]{2}){5})", text):
-                    out[m.group(1)] = _norm_mac(m.group(2))
+                    mac = _norm_mac(m.group(2))
+                    if mac and not _is_placeholder_mac(mac):
+                        out[m.group(1)] = mac
         except Exception:
             pass
         if not out and sys.platform.startswith("linux"):
@@ -735,8 +937,10 @@ class Scanner(threading.Thread):
                 with open("/proc/net/arp") as f:
                     for line in f.readlines()[1:]:
                         p = line.split()
-                        if len(p) >= 4 and p[3] != "00:00:00:00:00:00":
-                            out[p[0]] = _norm_mac(p[3])
+                        if len(p) >= 4:
+                            mac = _norm_mac(p[3])
+                            if mac and not _is_placeholder_mac(mac):
+                                out[p[0]] = mac
             except OSError:
                 pass
         return out
@@ -745,23 +949,35 @@ class Scanner(threading.Thread):
     def _scan_mdns(self):
         """Bonjour discovery — catches Apple-style hosts (Macs, iPhones, iPads,
         Apple TVs) that drop ICMP and so are invisible to the ping sweep.
-        Announces become brand-new device rows, not just names."""
+        Announces become brand-new device rows, not just names, and bring their
+        own IPv6/MAC when the device advertises them."""
         if self.stop_event.is_set():
             return
         self.q.put(("status", "Browsing Bonjour/mDNS services …"))
-        self.mdns = mdns_discover()
+        self.mdns_info = mdns_discover()
 
         with self.lock:
             existing = {d.ip: d for d in self.devices.values()}
         updated, new_ips = [], {}
-        for ip, (host, svc) in self.mdns.items():
+        for ip, info in self.mdns_info.items():
             dev = existing.get(ip)
-            if dev is not None:
-                if host and not dev.name:
-                    dev.name = host
-                    updated.append(replace(dev))
-            else:
-                new_ips[ip] = (host, svc)
+            if dev is None:
+                new_ips[ip] = info
+                continue
+            changed = False
+            if info.host and not dev.name:
+                dev.name = info.host
+                changed = True
+            if info.ipv6 and not dev.ipv6:
+                dev.ipv6 = info.ipv6
+                changed = True
+            if info.mac and not dev.mac:
+                dev.mac = info.mac
+                dev.vendor = vendor_for(info.mac)
+                dev.kind = kind_from_service(info.service) or kind_for(info.mac)
+                changed = True
+            if changed:
+                updated.append(replace(dev))
         for d in updated:
             self.q.put(("device", d))
 
@@ -769,26 +985,39 @@ class Scanner(threading.Thread):
             return
         self.q.put(("status", f"Joining {len(new_ips)} Bonjour-only device(s) …"))
 
-        def poke(item):
-            ip, (host, svc) = item
+        def poke(info: MdnsInfo):
             if self.stop_event.is_set():
                 return
-            mac = self._poke_mac(ip)
+            # A MAC from the Bonjour TXT record beats the ARP poke (no traffic,
+            # and it works for hosts the neighbour table won't tell us about).
+            mac = info.mac or self._poke_mac(info.ip)
             with self.lock:
-                if ip in self.devices:
-                    return
-                kind = kind_from_service(svc) or (kind_for(mac) if mac else "")
-                dev = Device(ip=ip, name=host, mac=mac,
-                             vendor=vendor_for(mac), kind=kind,
-                             key_id=ip)
-                dev._enriched = bool(mac)
-                self.devices[dev.key] = dev
+                # Keyed by IP, so a host already listed by its MAC is updated
+                # rather than added a second time.
+                dev = next((d for d in self.devices.values()
+                            if d.ip == info.ip), None)
+                if dev is None:
+                    dev = Device(ip=info.ip, name=info.host, ipv6=info.ipv6,
+                                 mac=mac, vendor=vendor_for(mac),
+                                 kind=kind_from_service(info.service) or kind_for(mac),
+                                 key_id=mac or info.ip)
+                    dev._enriched = bool(mac)
+                    self.devices[dev.key] = dev
+                else:
+                    if mac and not dev.mac:
+                        dev.mac = mac
+                        dev.vendor = vendor_for(mac)
+                        dev.kind = kind_from_service(info.service) or kind_for(mac)
+                    elif info.ipv6 and not dev.ipv6:
+                        dev.ipv6 = info.ipv6
+                    else:
+                        return
                 snapshot = replace(dev)
             self.q.put(("device", snapshot))
 
         with ThreadPoolExecutor(max_workers=min(16, len(new_ips)),
                                 thread_name_prefix="mdns") as pool:
-            for _ in pool.map(poke, new_ips.items()):
+            for _ in pool.map(poke, new_ips.values()):
                 pass
 
     def _poke_mac(self, ip: str) -> str:

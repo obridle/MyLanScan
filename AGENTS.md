@@ -136,13 +136,33 @@ only at the end. Samples live in `Sample/` (`S1mvp.py` = discovery MVP,
 Gotchas proven on this network/Mac:
 - This Mac drops ICMP echo (firewall stealth mode) → ping sweep never sees it; ARP-based
   discovery is required to catch such hosts.
-- Right after a /24 ping sweep, `arp -a` can exceed a short subprocess timeout while the
-  kernel table settles — retry once (S1mvp does) or MAC joins silently fail.
+- Right after a /24 ping sweep, `arp -an` can exceed a short subprocess timeout while the
+  kernel table settles — retry once (S1mvp does) or MAC joins silently fail. Use `arp -an`,
+  not `arp -a`: `-a` reverse-resolves every entry and is far slower.
 - **macOS strips leading zeros in ARP MAC octets** (`e0:98:6:da:33:3f`, 15 chars, not 17).
   Any regex/parser assuming fixed-width colon-separated pairs silently drops those entries;
   normalize per-group (`zfill(2)`), don't strip-and-count hex digits. Quiet IoT hosts also
   expire their kernel ARP entries within seconds — read each host's entry right after its
   ping succeeds (`arp -n <ip>`), not once at end of sweep.
+- **`ndp -an` column layout (checked on macOS 27.0.1 / 26A434, M5):** link-local neighbours
+  keep the old `fe80::…%en0` form, but *global* ones have no `%iface` suffix and carry the
+  interface in its own column (`2a02:…:d016   4a:f2:9c:d8:9c:5a    en0 17h S`). A parser
+  requiring `"%" in fields[0]` drops every global entry — the fixed form is `_parse_ndp`,
+  and that omission was the "no IPv6 at all" bug fixed in v0.3.3. 49 of 83 rows on this LAN.
+- **Restricted processes see fake MACs.** Run `arp -an` / `ndp -an` / `ifconfig en0` from a
+  sandboxed shell (OpenCode's own tool shell does this) and every link-layer address reads
+  `02:00:00:00:00:00` (`2:0:0:0:0:0` from ndp, `ether 02:00:00:00:00:00` from ifconfig)
+  while the IPv4 ARP table comes back empty — yet `ping`, mDNS and `networksetup
+  -listallhardwareports` all work. The same process run outside that sandbox (e.g. via
+  `launchctl submit`) sees the full table. So: never diagnose this as "macOS 27 redacts
+  MACs" without re-checking from an unrestricted process, and always filter the
+  `02:00:00:00:00:00` placeholder (`_is_placeholder_mac`) so it can't be shown as a real
+  MAC or turned into a bogus "Private MAC (randomized)" vendor.
+- **Bonjour TXT `deviceid` is a real MAC source** independent of ARP: `_airplay._tcp` and
+  `_raop._tcp` publish it (RAOP instance names also start `AABBCCDDEEFF@`), verified for
+  Sky Q boxes and this Mac. `_mac_from_mdns` uses it, which is how MACs still get filled
+  when the neighbour table is unavailable. IPv6-by-name (`dns-sd -G v4v6 <host>.local`,
+  `Scanner._dns_sd_ipv6`) is the equivalent fallback for the IPv6 column.
 - macOS has no `AF_PACKET`; raw packet send goes through BPF/libpcap (scapy), root only.
 - iOS/Android **Private Wi-Fi Addresses** are randomized: the MAC's locally-administered
   bit (octet-1 `& 0x02`) is set and the OUI is fake, so the IEEE table has no vendor.
